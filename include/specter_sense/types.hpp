@@ -1,0 +1,96 @@
+#pragma once
+
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace specter {
+
+struct Point2 {
+  double x{};
+  double y{};
+};
+
+struct Point3 {
+  double x{};
+  double y{};
+  double z{};
+};
+
+struct Intrinsics {
+  double fx{};
+  double fy{};
+  double cx{};
+  double cy{};
+};
+
+struct DepthFrame {
+  std::size_t width{};
+  std::size_t height{};
+  std::vector<float> depth_mm;
+  Intrinsics intrinsics;
+  std::chrono::system_clock::time_point observed_at;
+};
+
+struct Transform {
+  std::array<double, 16> matrix{
+      1, 0, 0, 0,
+      0, 0, 1, 0,
+      0, -1, 0, 0,
+      0, 0, 0, 1};
+};
+
+struct ZoneConfig {
+  std::string name;
+  std::vector<Point2> floor_polygon;
+  double min_height_m{};
+  double max_height_m{2.5};
+  std::size_t enter_points{100};
+  std::size_t exit_points{50};
+  std::chrono::milliseconds enter_after{250};
+  std::chrono::milliseconds exit_after{1000};
+};
+
+struct ProcessingConfig {
+  double min_depth_m{0.5};
+  double max_depth_m{4.5};
+  double foreground_delta_m{0.15};
+  double background_alpha{0.002};
+  std::size_t warmup_frames{30};
+};
+
+struct AppConfig {
+  Transform camera_to_room;
+  ProcessingConfig processing;
+  std::vector<ZoneConfig> zones;
+};
+
+struct ZoneState {
+  std::string name;
+  bool occupied{};
+  double occupancy_score{};
+  std::size_t foreground_points{};
+  std::optional<Point3> centroid_m;
+  std::optional<double> nearest_range_m;
+  std::optional<double> farthest_range_m;
+  std::chrono::system_clock::time_point observed_at;
+};
+
+struct SensorState {
+  bool connected{};
+  bool reconnecting{};
+  std::string status{"starting"};
+};
+
+struct Snapshot {
+  std::chrono::system_clock::time_point generated_at;
+  std::optional<std::chrono::system_clock::time_point> last_valid_frame_at;
+  SensorState sensor;
+  std::vector<ZoneState> zones;
+};
+
+}  // namespace specter
