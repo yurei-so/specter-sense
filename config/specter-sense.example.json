@@ -1,0 +1,27 @@
+{
+  "camera_to_room": [
+    1, 0, 0, 0,
+    0, 0, 1, 0,
+    0, -1, 0, 1.0,
+    0, 0, 0, 1
+  ],
+  "processing": {
+    "min_depth_m": 0.5,
+    "max_depth_m": 4.5,
+    "foreground_delta_m": 0.15,
+    "background_alpha": 0.002,
+    "warmup_frames": 30
+  },
+  "zones": [
+    {
+      "name": "demo",
+      "floor_polygon": [[-0.75, 0.75], [0.75, 0.75], [0.75, 2.25], [-0.75, 2.25]],
+      "min_height_m": 0.0,
+      "max_height_m": 2.2,
+      "enter_points": 100,
+      "exit_points": 50,
+      "enter_after_ms": 250,
+      "exit_after_ms": 1000
+    }
+  ]
+}
