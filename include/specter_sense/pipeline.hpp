@@ -8,6 +8,7 @@
 namespace specter {
 
 Point3 transform_point(const Transform& transform, const Point3& point);
+Point3 deproject_depth(const Intrinsics& intrinsics, double pixel_x, double pixel_y, double depth_m);
 bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon);
 
 class OccupancyPipeline {

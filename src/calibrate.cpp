@@ -11,6 +11,7 @@
 #include <csignal>
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -35,6 +36,7 @@ struct Vec3 {
 };
 
 Vec3 operator-(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+Vec3 operator+(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Vec3 operator*(Vec3 a, double scale) { return {a.x * scale, a.y * scale, a.z * scale}; }
 double dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 Vec3 cross(Vec3 a, Vec3 b) {
@@ -44,30 +46,6 @@ double length(Vec3 value) { return std::sqrt(dot(value, value)); }
 Vec3 normalized(Vec3 value) {
   const double size = length(value);
   return size > 1e-9 ? value * (1.0 / size) : Vec3{};
-}
-
-std::array<double, 16> multiply(const std::array<double, 16>& a, const std::array<double, 16>& b) {
-  std::array<double, 16> result{};
-  for (int row = 0; row < 4; ++row)
-    for (int col = 0; col < 4; ++col)
-      for (int k = 0; k < 4; ++k)
-        result[static_cast<std::size_t>(row * 4 + col)] +=
-            a[static_cast<std::size_t>(row * 4 + k)] * b[static_cast<std::size_t>(k * 4 + col)];
-  return result;
-}
-
-std::array<double, 16> room_rotation(char axis, double radians) {
-  const double c = std::cos(radians);
-  const double s = std::sin(radians);
-  std::array<double, 16> matrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-  if (axis == 'x') {
-    matrix[5] = c; matrix[6] = -s; matrix[9] = s; matrix[10] = c;
-  } else if (axis == 'y') {
-    matrix[0] = c; matrix[2] = s; matrix[8] = -s; matrix[10] = c;
-  } else {
-    matrix[0] = c; matrix[1] = -s; matrix[4] = s; matrix[5] = c;
-  }
-  return matrix;
 }
 
 const char* glyph(char input) {
@@ -180,7 +158,7 @@ class CalibrationApp {
   }
 
  private:
-  enum class HeightDrag { none, minimum, maximum };
+  enum class GizmoAxis { none, x, y, z };
 
   static CalibrationApp& self(GLFWwindow* window) {
     return *static_cast<CalibrationApp*>(glfwGetWindowUserPointer(window));
@@ -218,10 +196,8 @@ class CalibrationApp {
       for (std::size_t u = 0; u < frame_->width; u += stride) {
         const double depth = frame_->depth_mm[v * frame_->width + u] / 1000.0;
         if (!std::isfinite(depth) || depth < config_.processing.min_depth_m || depth > config_.processing.max_depth_m) continue;
-        const specter::Point3 camera{
-            (static_cast<double>(u) - frame_->intrinsics.cx) * depth / frame_->intrinsics.fx,
-            (static_cast<double>(v) - frame_->intrinsics.cy) * depth / frame_->intrinsics.fy,
-            depth};
+        const specter::Point3 camera = specter::deproject_depth(
+            frame_->intrinsics, static_cast<double>(u), static_cast<double>(v), depth);
         camera_points_.push_back({camera.x, camera.y, camera.z});
         const auto room = specter::transform_point(config_.camera_to_room, camera);
         room_points_.push_back({room.x, room.y, room.z});
@@ -281,51 +257,32 @@ class CalibrationApp {
 
   void on_key(int key, int action, int mods) {
     if (renaming_) {
-      if (key == GLFW_KEY_ENTER && action == GLFW_PRESS) {
-        if (!rename_buffer_.empty() && selected_ >= 0) {
-          const auto before = config_;
-          config_.zones[static_cast<std::size_t>(selected_)].name = rename_buffer_;
-          remember(before);
-        }
-        renaming_ = false;
-      } else if (key == GLFW_KEY_ESCAPE) renaming_ = false;
-      else if (key == GLFW_KEY_BACKSPACE && !rename_buffer_.empty()) rename_buffer_.pop_back();
-      return;
-    }
-    if (save_preview_) {
-      if (key == GLFW_KEY_ENTER) {
-        try {
-          specter::save_config_atomic(options_.config, config_);
-          original_ = config_;
-          status_ = "SAVED ATOMICALLY: " + options_.config.string();
-        } catch (const std::exception& error) { status_ = std::string("SAVE FAILED: ") + error.what(); }
-        save_preview_ = false;
-      } else if (key == GLFW_KEY_ESCAPE) save_preview_ = false;
+      if (key == GLFW_KEY_BACKSPACE && action == GLFW_PRESS && !rename_buffer_.empty()) rename_buffer_.pop_back();
       return;
     }
     const bool control = (mods & GLFW_MOD_CONTROL) != 0;
-    const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
-    if (control && key == GLFW_KEY_S) { validate_for_preview(); return; }
-    if (control && key == GLFW_KEY_Z) { shift ? redo() : undo(); return; }
-    if (control && key == GLFW_KEY_D && selected_ >= 0) { duplicate_zone(); return; }
-    if (key == GLFW_KEY_ESCAPE) { drawing_ = false; draft_.clear(); return; }
-    if (key == GLFW_KEY_SPACE) { frozen_ = !frozen_; status_ = frozen_ ? "DEPTH FRAME FROZEN" : "LIVE DEPTH"; }
-    else if (key == GLFW_KEY_T) top_down_ = !top_down_;
-    else if (key == GLFW_KEY_N && top_down_) { drawing_ = true; draft_.clear(); status_ = "CLICK POLYGON VERTICES, ENTER TO FINISH"; }
-    else if (key == GLFW_KEY_ENTER && drawing_) finish_polygon();
-    else if (key == GLFW_KEY_TAB && !config_.zones.empty()) selected_ = (selected_ + 1) % static_cast<int>(config_.zones.size());
-    else if (key == GLFW_KEY_DELETE && selected_ >= 0) delete_zone();
-    else if (key == GLFW_KEY_R && selected_ >= 0) { renaming_ = true; rename_buffer_ = config_.zones[static_cast<std::size_t>(selected_)].name; }
-    else if (key == GLFW_KEY_F) estimate_floor();
-    else if (key == GLFW_KEY_V) live_validation_ = !live_validation_;
-    else if (key == GLFW_KEY_H) show_help_ = !show_help_;
-    else if (selected_ >= 0 && (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET ||
-                               key == GLFW_KEY_SEMICOLON || key == GLFW_KEY_APOSTROPHE ||
-                               key == GLFW_KEY_MINUS || key == GLFW_KEY_EQUAL ||
-                               key == GLFW_KEY_COMMA || key == GLFW_KEY_PERIOD ||
-                               key == GLFW_KEY_7 || key == GLFW_KEY_8 ||
-                               key == GLFW_KEY_9 || key == GLFW_KEY_0)) adjust_zone(key);
-    else if ((mods & GLFW_MOD_ALT) != 0) adjust_transform(key, shift ? 0.05 : 0.01);
+    if (control && key == GLFW_KEY_N && action == GLFW_PRESS) create_box();
+  }
+
+  void create_box() {
+    const auto before = config_;
+    specter::ZoneConfig zone;
+    std::size_t suffix = config_.zones.size() + 1;
+    do {
+      zone.name = "zone_" + std::to_string(suffix++);
+    } while (std::any_of(config_.zones.begin(), config_.zones.end(), [&](const auto& item) { return item.name == zone.name; }));
+    constexpr double half = 0.5;
+    zone.floor_polygon = {
+        {target_x_ - half, target_y_ - half}, {target_x_ + half, target_y_ - half},
+        {target_x_ + half, target_y_ + half}, {target_x_ - half, target_y_ + half}};
+    zone.min_height_m = 0;
+    zone.max_height_m = 2;
+    config_.zones.push_back(std::move(zone));
+    selected_ = static_cast<int>(config_.zones.size() - 1);
+    selected_vertex_ = 0;
+    selected_top_ = false;
+    remember(before);
+    status_ = "BOUNDING BOX CREATED - CLICK A CORNER OR GIZMO AXIS";
   }
 
   void on_char(unsigned int codepoint) {
@@ -338,8 +295,102 @@ class CalibrationApp {
     glfwGetFramebufferSize(window_, &width, &height);
     const double viewport_width = std::max(1, width - panel_width);
     const double aspect = viewport_width / std::max(1.0, static_cast<double>(height));
-    return {pan_x_ + (x / viewport_width * 2.0 - 1.0) * top_scale_ * aspect,
+    return {pan_x_ + ((1.0 - x / viewport_width) * 2.0 - 1.0) * top_scale_ * aspect,
             pan_y_ + (1.0 - y / static_cast<double>(height) * 2.0) * top_scale_};
+  }
+
+  struct CameraFrame { Vec3 eye, forward, right, up; };
+
+  CameraFrame camera_frame() const {
+    const Vec3 target{target_x_, target_y_, target_z_};
+    const double horizontal = orbit_distance_ * std::cos(orbit_pitch_);
+    const Vec3 eye{
+        target.x + horizontal * std::sin(orbit_yaw_),
+        target.y - horizontal * std::cos(orbit_yaw_),
+        target.z + orbit_distance_ * std::sin(orbit_pitch_)};
+    const Vec3 forward = normalized(target - eye);
+    const Vec3 right = normalized(cross(forward, {0, 0, 1}));
+    return {eye, forward, right, cross(right, forward)};
+  }
+
+  std::optional<specter::Point2> project(Vec3 point) const {
+    int width, height;
+    glfwGetWindowSize(window_, &width, &height);
+    const int viewport_width = std::max(1, width - panel_width);
+    if (top_down_) {
+      const double aspect = static_cast<double>(viewport_width) / std::max(1, height);
+      return specter::Point2{
+          viewport_width - ((point.x - pan_x_) / (top_scale_ * aspect) + 1.0) * 0.5 * viewport_width,
+          (1.0 - (point.y - pan_y_) / top_scale_) * 0.5 * height};
+    }
+    const auto camera = camera_frame();
+    const Vec3 relative = point - camera.eye;
+    const double depth = dot(relative, camera.forward);
+    if (depth <= 0.05) return std::nullopt;
+    const double focal = static_cast<double>(height) / (2.0 * std::tan(55.0 * pi / 360.0));
+    return specter::Point2{
+        viewport_width * 0.5 - dot(relative, camera.right) / depth * focal,
+        height * 0.5 - dot(relative, camera.up) / depth * focal};
+  }
+
+  Vec3 selected_point() const {
+    if (selected_ < 0 || selected_vertex_ < 0) return {};
+    const auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
+    const auto& point = zone.floor_polygon[static_cast<std::size_t>(selected_vertex_)];
+    return {point.x, point.y, selected_top_ ? zone.max_height_m : zone.min_height_m};
+  }
+
+  bool pick_corner(double x, double y) {
+    double best = 14.0;
+    int zone_index = -1, vertex_index = -1;
+    bool top = false;
+    for (std::size_t z = 0; z < config_.zones.size(); ++z) {
+      const auto& zone = config_.zones[z];
+      for (std::size_t v = 0; v < zone.floor_polygon.size(); ++v) {
+        for (const bool is_top : {false, true}) {
+          if (top_down_ && is_top) continue;
+          const auto& floor = zone.floor_polygon[v];
+          const auto screen = project({floor.x, floor.y, is_top ? zone.max_height_m : zone.min_height_m});
+          if (!screen) continue;
+          const double distance = std::hypot(screen->x - x, screen->y - y);
+          if (distance < best) {
+            best = distance; zone_index = static_cast<int>(z); vertex_index = static_cast<int>(v); top = is_top;
+          }
+        }
+      }
+    }
+    if (zone_index < 0) return false;
+    selected_ = zone_index; selected_vertex_ = vertex_index; selected_top_ = top;
+    status_ = "CORNER SELECTED - DRAG A COLORED AXIS";
+    return true;
+  }
+
+  static double distance_to_segment(double px, double py, specter::Point2 a, specter::Point2 b) {
+    const double dx = b.x - a.x, dy = b.y - a.y;
+    const double length_squared = dx * dx + dy * dy;
+    const double t = length_squared > 0
+        ? std::clamp(((px - a.x) * dx + (py - a.y) * dy) / length_squared, 0.0, 1.0) : 0.0;
+    return std::hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+  }
+
+  GizmoAxis pick_gizmo(double x, double y) const {
+    if (selected_ < 0 || selected_vertex_ < 0) return GizmoAxis::none;
+    const Vec3 origin = selected_point();
+    const auto start = project(origin);
+    if (!start) return GizmoAxis::none;
+    if (std::hypot(start->x - x, start->y - y) < 14.0) return GizmoAxis::none;
+    const std::array<std::pair<GizmoAxis, Vec3>, 3> axes{{
+        {GizmoAxis::x, {0.45, 0, 0}}, {GizmoAxis::y, {0, 0.45, 0}}, {GizmoAxis::z, {0, 0, 0.45}}}};
+    GizmoAxis best_axis = GizmoAxis::none;
+    double best = 9.0;
+    for (const auto& [axis, delta] : axes) {
+      if (top_down_ && axis == GizmoAxis::z) continue;
+      const auto end = project(origin + delta);
+      if (!end) continue;
+      const double distance = distance_to_segment(x, y, *start, *end);
+      if (distance < best) { best = distance; best_axis = axis; }
+    }
+    return best_axis;
   }
 
   void on_cursor(double x, double y) {
@@ -348,11 +399,29 @@ class CalibrationApp {
     mouse_x_ = x; mouse_y_ = y;
     int width, height;
     glfwGetWindowSize(window_, &width, &height);
-    if (height_drag_ != HeightDrag::none && selected_ >= 0) {
-      auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
-      const double value = std::clamp((static_cast<double>(height) - 80.0 - y) / (height - 180.0) * 3.0, -0.5, 3.5);
-      if (height_drag_ == HeightDrag::minimum) zone.min_height_m = std::min(value, zone.max_height_m - 0.05);
-      else zone.max_height_m = std::max(value, zone.min_height_m + 0.05);
+    if (gizmo_drag_ != GizmoAxis::none && selected_ >= 0 && selected_vertex_ >= 0) {
+      const Vec3 origin = selected_point();
+      Vec3 delta{};
+      if (gizmo_drag_ == GizmoAxis::x) delta.x = 0.45;
+      if (gizmo_drag_ == GizmoAxis::y) delta.y = 0.45;
+      if (gizmo_drag_ == GizmoAxis::z) delta.z = 0.45;
+      const auto start = project(origin);
+      const auto end = project(origin + delta);
+      if (start && end) {
+        const double axis_x = end->x - start->x, axis_y = end->y - start->y;
+        const double pixels = std::hypot(axis_x, axis_y);
+        if (pixels > 1) {
+          const double metres = (dx * axis_x + dy * axis_y) / (pixels * pixels) * 0.45;
+          auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
+          auto& vertex = zone.floor_polygon[static_cast<std::size_t>(selected_vertex_)];
+          if (gizmo_drag_ == GizmoAxis::x) vertex.x += metres;
+          if (gizmo_drag_ == GizmoAxis::y) vertex.y += metres;
+          if (gizmo_drag_ == GizmoAxis::z) {
+            if (selected_top_) zone.max_height_m = std::max(zone.min_height_m + 0.05, zone.max_height_m + metres);
+            else zone.min_height_m = std::min(zone.max_height_m - 0.05, zone.min_height_m + metres);
+          }
+        }
+      }
       rebuild_pipeline();
       return;
     }
@@ -365,16 +434,14 @@ class CalibrationApp {
         const double scale = orbit_distance_ * 0.0015;
         const Vec3 right{std::cos(orbit_yaw_), std::sin(orbit_yaw_), 0};
         const Vec3 forward{-std::sin(orbit_yaw_), std::cos(orbit_yaw_), 0};
-        target_x_ -= right.x * dx * scale - forward.x * dy * scale;
-        target_y_ -= right.y * dx * scale - forward.y * dy * scale;
+        target_x_ += right.x * dx * scale + forward.x * dy * scale;
+        target_y_ += right.y * dx * scale + forward.y * dy * scale;
       }
       return;
     }
     if (!left_down_) return;
-    if (top_down_ && selected_ >= 0 && edit_vertex_ >= 0) {
-      config_.zones[static_cast<std::size_t>(selected_)].floor_polygon[static_cast<std::size_t>(edit_vertex_)] = screen_to_floor(x, y);
-      rebuild_pipeline();
-    } else if (top_down_ && translating_ && selected_ >= 0) {
+    if (corner_click_) return;
+    if (top_down_ && translating_ && selected_ >= 0) {
       const auto current = screen_to_floor(x, y);
       const auto previous = screen_to_floor(x - dx, y - dy);
       for (auto& point : config_.zones[static_cast<std::size_t>(selected_)].floor_polygon) {
@@ -382,53 +449,42 @@ class CalibrationApp {
       }
       rebuild_pipeline();
     } else if (!top_down_) {
-      orbit_yaw_ -= dx * 0.006;
+      orbit_yaw_ += dx * 0.006;
       orbit_pitch_ = std::clamp(orbit_pitch_ + dy * 0.006, -1.45, 1.45);
     }
   }
 
-  void on_mouse(int button, int action, int mods) {
+  void on_mouse(int button, int action, int) {
     int width, height;
     glfwGetWindowSize(window_, &width, &height);
-    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && mouse_x_ > width - panel_width) {
-      if (selected_ >= 0 && mouse_x_ > width - 55) {
-        auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
-        auto height_y = [&](double value) { return height - 80.0 - (value / 3.0) * (height - 180.0); };
-        if (std::abs(mouse_y_ - height_y(zone.min_height_m)) < 14) height_drag_ = HeightDrag::minimum;
-        else if (std::abs(mouse_y_ - height_y(zone.max_height_m)) < 14) height_drag_ = HeightDrag::maximum;
-        if (height_drag_ != HeightDrag::none) edit_before_ = config_;
-      }
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS &&
+        (save_preview_ || mouse_x_ > width - panel_width)) {
+      handle_panel_click(mouse_x_, mouse_y_, width, height);
       return;
     }
     if (button == GLFW_MOUSE_BUTTON_RIGHT) { right_down_ = action == GLFW_PRESS; return; }
     if (button != GLFW_MOUSE_BUTTON_LEFT) return;
     left_down_ = action == GLFW_PRESS;
     if (action == GLFW_RELEASE) {
-      if (height_drag_ != HeightDrag::none || edit_vertex_ >= 0 || translating_) remember(edit_before_);
-      height_drag_ = HeightDrag::none; edit_vertex_ = -1; translating_ = false;
+      if (gizmo_drag_ != GizmoAxis::none || translating_) remember(edit_before_);
+      gizmo_drag_ = GizmoAxis::none; translating_ = false; corner_click_ = false;
       return;
     }
+    const auto axis = pick_gizmo(mouse_x_, mouse_y_);
+    if (axis != GizmoAxis::none) {
+      edit_before_ = config_; gizmo_drag_ = axis; return;
+    }
+    if (pick_corner(mouse_x_, mouse_y_)) { corner_click_ = true; return; }
     if (!top_down_) return;
     const auto point = screen_to_floor(mouse_x_, mouse_y_);
-    if (drawing_) { draft_.push_back(point); return; }
     edit_before_ = config_;
-    if ((mods & GLFW_MOD_SHIFT) && selected_ >= 0 &&
-        specter::point_in_polygon(point, config_.zones[static_cast<std::size_t>(selected_)].floor_polygon)) {
+    if (selected_ >= 0 && specter::point_in_polygon(point, config_.zones[static_cast<std::size_t>(selected_)].floor_polygon)) {
       translating_ = true; return;
     }
-    double best = 0.15 * top_scale_ / 3.0;
-    int best_zone = -1, best_vertex = -1;
-    for (std::size_t z = 0; z < config_.zones.size(); ++z) {
-      for (std::size_t v = 0; v < config_.zones[z].floor_polygon.size(); ++v) {
-        const auto delta_x = config_.zones[z].floor_polygon[v].x - point.x;
-        const auto delta_y = config_.zones[z].floor_polygon[v].y - point.y;
-        const double distance = std::hypot(delta_x, delta_y);
-        if (distance < best) { best = distance; best_zone = static_cast<int>(z); best_vertex = static_cast<int>(v); }
-      }
-    }
-    if (best_zone >= 0) { selected_ = best_zone; edit_vertex_ = best_vertex; return; }
     for (std::size_t z = 0; z < config_.zones.size(); ++z)
-      if (specter::point_in_polygon(point, config_.zones[z].floor_polygon)) selected_ = static_cast<int>(z);
+      if (specter::point_in_polygon(point, config_.zones[z].floor_polygon)) {
+        selected_ = static_cast<int>(z); selected_vertex_ = -1;
+      }
   }
 
   void on_scroll(double amount) {
@@ -436,25 +492,19 @@ class CalibrationApp {
     else orbit_distance_ = std::clamp(orbit_distance_ * std::pow(0.88, amount), 0.5, 20.0);
   }
 
-  void finish_polygon() {
-    if (draft_.size() < 3) { status_ = "A ZONE NEEDS AT LEAST 3 VERTICES"; return; }
-    const auto before = config_;
-    specter::ZoneConfig zone;
-    zone.name = "zone_" + std::to_string(config_.zones.size() + 1);
-    zone.floor_polygon = draft_;
-    config_.zones.push_back(std::move(zone));
-    selected_ = static_cast<int>(config_.zones.size() - 1);
-    drawing_ = false; draft_.clear();
-    remember(before);
-  }
-
   void duplicate_zone() {
     const auto before = config_;
     auto copy = config_.zones[static_cast<std::size_t>(selected_)];
-    copy.name += "_copy";
+    const std::string base = copy.name + "_copy";
+    copy.name = base;
+    std::size_t suffix = 2;
+    while (std::any_of(config_.zones.begin(), config_.zones.end(), [&](const auto& item) { return item.name == copy.name; }))
+      copy.name = base + std::to_string(suffix++);
     for (auto& point : copy.floor_polygon) { point.x += 0.15; point.y += 0.15; }
     config_.zones.push_back(std::move(copy));
     selected_ = static_cast<int>(config_.zones.size() - 1);
+    selected_vertex_ = 0;
+    selected_top_ = false;
     remember(before);
   }
 
@@ -462,45 +512,74 @@ class CalibrationApp {
     const auto before = config_;
     config_.zones.erase(config_.zones.begin() + selected_);
     selected_ = config_.zones.empty() ? -1 : std::min(selected_, static_cast<int>(config_.zones.size() - 1));
+    selected_vertex_ = -1;
     remember(before);
   }
 
-  void adjust_zone(int key) {
+  static bool inside(double x, double y, double left, double top, double width, double height) {
+    return x >= left && x <= left + width && y >= top && y <= top + height;
+  }
+
+  void apply_rename() {
+    if (selected_ < 0 || rename_buffer_.empty()) return;
     const auto before = config_;
-    auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
-    if (key == GLFW_KEY_LEFT_BRACKET) zone.min_height_m -= 0.05;
-    if (key == GLFW_KEY_RIGHT_BRACKET) zone.min_height_m = std::min(zone.max_height_m - 0.05, zone.min_height_m + 0.05);
-    if (key == GLFW_KEY_SEMICOLON) zone.max_height_m = std::max(zone.min_height_m + 0.05, zone.max_height_m - 0.05);
-    if (key == GLFW_KEY_APOSTROPHE) zone.max_height_m += 0.05;
-    if (key == GLFW_KEY_MINUS) zone.enter_points = std::max(zone.exit_points, zone.enter_points > 10 ? zone.enter_points - 10 : zone.exit_points);
-    if (key == GLFW_KEY_EQUAL) zone.enter_points += 10;
-    if (key == GLFW_KEY_COMMA) zone.exit_points = std::max<std::size_t>(1, zone.exit_points > 10 ? zone.exit_points - 10 : 1);
-    if (key == GLFW_KEY_PERIOD) zone.exit_points = std::min(zone.enter_points, zone.exit_points + 10);
-    if (key == GLFW_KEY_9) zone.enter_after = std::max(std::chrono::milliseconds(0), zone.enter_after - std::chrono::milliseconds(50));
-    if (key == GLFW_KEY_0) zone.enter_after += std::chrono::milliseconds(50);
-    if (key == GLFW_KEY_7) zone.exit_after = std::max(std::chrono::milliseconds(0), zone.exit_after - std::chrono::milliseconds(100));
-    if (key == GLFW_KEY_8) zone.exit_after += std::chrono::milliseconds(100);
+    config_.zones[static_cast<std::size_t>(selected_)].name = rename_buffer_;
+    renaming_ = false;
     remember(before);
   }
 
-  void adjust_transform(int key, double step) {
+  void confirm_save() {
+    try {
+      specter::save_config_atomic(options_.config, config_);
+      original_ = config_;
+      status_ = "SAVED ATOMICALLY: " + options_.config.string();
+    } catch (const std::exception& error) { status_ = std::string("SAVE FAILED: ") + error.what(); }
+    save_preview_ = false;
+  }
+
+  void change_selected(const std::function<void(specter::ZoneConfig&)>& change) {
+    if (selected_ < 0) return;
     const auto before = config_;
-    auto& matrix = config_.camera_to_room.matrix;
-    bool changed = true;
-    if (key == GLFW_KEY_LEFT) matrix[3] -= step;
-    else if (key == GLFW_KEY_RIGHT) matrix[3] += step;
-    else if (key == GLFW_KEY_UP) matrix[7] += step;
-    else if (key == GLFW_KEY_DOWN) matrix[7] -= step;
-    else if (key == GLFW_KEY_PAGE_UP) matrix[11] += step;
-    else if (key == GLFW_KEY_PAGE_DOWN) matrix[11] -= step;
-    else if (key == GLFW_KEY_I || key == GLFW_KEY_K)
-      matrix = multiply(room_rotation('x', key == GLFW_KEY_I ? step : -step), matrix);
-    else if (key == GLFW_KEY_J || key == GLFW_KEY_L)
-      matrix = multiply(room_rotation('y', key == GLFW_KEY_J ? step : -step), matrix);
-    else if (key == GLFW_KEY_U || key == GLFW_KEY_O)
-      matrix = multiply(room_rotation('z', key == GLFW_KEY_U ? step : -step), matrix);
-    else changed = false;
-    if (changed) remember(before);
+    change(config_.zones[static_cast<std::size_t>(selected_)]);
+    remember(before);
+  }
+
+  void handle_panel_click(double x, double y, int width, int height) {
+    const double left = width - panel_width + 16;
+    if (save_preview_) {
+      if (inside(x, y, 125, height - 175, 360, 35)) confirm_save();
+      else if (inside(x, y, 510, height - 175, 180, 35)) save_preview_ = false;
+      return;
+    }
+    if (renaming_) {
+      if (inside(x, y, left, 316, 135, 30)) apply_rename();
+      else if (inside(x, y, left + 145, 316, 135, 30)) renaming_ = false;
+      return;
+    }
+    if (inside(x, y, left, 88, 142, 30)) top_down_ = false;
+    else if (inside(x, y, left + 152, 88, 142, 30)) top_down_ = true;
+    else if (inside(x, y, left, 126, 142, 30)) { frozen_ = !frozen_; status_ = frozen_ ? "DEPTH FRAME FROZEN" : "LIVE DEPTH"; }
+    else if (inside(x, y, left + 152, 126, 142, 30)) estimate_floor();
+    else if (inside(x, y, left, 164, 142, 30)) live_validation_ = !live_validation_;
+    else if (inside(x, y, left + 152, 164, 68, 30)) undo();
+    else if (inside(x, y, left + 226, 164, 68, 30)) redo();
+    else if (inside(x, y, left, 202, 68, 30) && !config_.zones.empty()) {
+      selected_ = (selected_ <= 0) ? static_cast<int>(config_.zones.size() - 1) : selected_ - 1; selected_vertex_ = -1;
+    } else if (inside(x, y, left + 74, 202, 68, 30) && !config_.zones.empty()) {
+      selected_ = (selected_ + 1) % static_cast<int>(config_.zones.size()); selected_vertex_ = -1;
+    } else if (inside(x, y, left + 152, 202, 68, 30) && selected_ >= 0) {
+      renaming_ = true; rename_buffer_ = config_.zones[static_cast<std::size_t>(selected_)].name;
+    } else if (inside(x, y, left + 226, 202, 68, 30) && selected_ >= 0) duplicate_zone();
+    else if (inside(x, y, left, 238, 294, 30) && selected_ >= 0) delete_zone();
+    else if (inside(x, y, left, 388, 34, 26)) change_selected([](auto& z) { z.enter_points = std::max(z.exit_points, z.enter_points > 10 ? z.enter_points - 10 : z.exit_points); });
+    else if (inside(x, y, left + 260, 388, 34, 26)) change_selected([](auto& z) { z.enter_points += 10; });
+    else if (inside(x, y, left, 426, 34, 26)) change_selected([](auto& z) { z.exit_points = std::max<std::size_t>(1, z.exit_points > 10 ? z.exit_points - 10 : 1); });
+    else if (inside(x, y, left + 260, 426, 34, 26)) change_selected([](auto& z) { z.exit_points = std::min(z.enter_points, z.exit_points + 10); });
+    else if (inside(x, y, left, 464, 34, 26)) change_selected([](auto& z) { z.enter_after = std::max(std::chrono::milliseconds(0), z.enter_after - std::chrono::milliseconds(50)); });
+    else if (inside(x, y, left + 260, 464, 34, 26)) change_selected([](auto& z) { z.enter_after += std::chrono::milliseconds(50); });
+    else if (inside(x, y, left, 502, 34, 26)) change_selected([](auto& z) { z.exit_after = std::max(std::chrono::milliseconds(0), z.exit_after - std::chrono::milliseconds(100)); });
+    else if (inside(x, y, left + 260, 502, 34, 26)) change_selected([](auto& z) { z.exit_after += std::chrono::milliseconds(100); });
+    else if (inside(x, y, left, height - 52, 294, 34)) validate_for_preview();
   }
 
   void estimate_floor() {
@@ -551,6 +630,7 @@ class CalibrationApp {
     const double near_plane = 0.05, far_plane = 100.0;
     const double top = near_plane * std::tan(55.0 * pi / 360.0);
     glFrustum(-top * aspect, top * aspect, -top, top, near_plane, far_plane);
+    glScaled(-1, 1, 1);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     const Vec3 target{target_x_, target_y_, target_z_};
@@ -581,7 +661,7 @@ class CalibrationApp {
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
     if (top_down_) {
       const double aspect = static_cast<double>(viewport_width) / std::max(1, height);
-      glOrtho(pan_x_ - top_scale_ * aspect, pan_x_ + top_scale_ * aspect,
+      glOrtho(pan_x_ + top_scale_ * aspect, pan_x_ - top_scale_ * aspect,
               pan_y_ - top_scale_, pan_y_ + top_scale_, -10, 10);
       glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     } else {
@@ -621,11 +701,7 @@ class CalibrationApp {
       glEnd();
     }
     for (std::size_t i = 0; i < config_.zones.size(); ++i) draw_zone(config_.zones[i], static_cast<int>(i) == selected_);
-    if (drawing_ && !draft_.empty()) {
-      glColor3f(1, 0.8F, 0.1F); glLineWidth(3); glBegin(GL_LINE_STRIP);
-      for (const auto point : draft_) glVertex3d(point.x, point.y, 0.04);
-      glEnd();
-    }
+    draw_gizmo();
   }
 
   void draw_zone(const specter::ZoneConfig& zone, bool selected) {
@@ -649,10 +725,42 @@ class CalibrationApp {
       glBegin(GL_LINE_LOOP); for (const auto point : polygon) glVertex3d(point.x, point.y, high); glEnd();
       glBegin(GL_LINES); for (const auto point : polygon) { glVertex3d(point.x, point.y, low); glVertex3d(point.x, point.y, high); } glEnd();
     }
+    glDisable(GL_DEPTH_TEST);
     if (top_down_ && selected) {
       glPointSize(9); glBegin(GL_POINTS); for (const auto point : polygon) glVertex3d(point.x, point.y, 0.08); glEnd();
+    } else if (!top_down_) {
+      glPointSize(selected ? 9.0F : 6.0F); glBegin(GL_POINTS);
+      for (const auto point : polygon) {
+        glVertex3d(point.x, point.y, zone.min_height_m);
+        glVertex3d(point.x, point.y, zone.max_height_m);
+      }
+      glEnd();
     }
+    glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
+  }
+
+  void draw_gizmo() {
+    if (selected_ < 0 || selected_vertex_ < 0) return;
+    const auto origin = selected_point();
+    glDisable(GL_DEPTH_TEST);
+    glLineWidth(5.0F);
+    glBegin(GL_LINES);
+    glColor3f(gizmo_drag_ == GizmoAxis::x ? 1.0F : 0.85F, 0.12F, 0.12F);
+    glVertex3d(origin.x, origin.y, origin.z); glVertex3d(origin.x + 0.45, origin.y, origin.z);
+    glColor3f(0.12F, gizmo_drag_ == GizmoAxis::y ? 1.0F : 0.85F, 0.15F);
+    glVertex3d(origin.x, origin.y, origin.z); glVertex3d(origin.x, origin.y + 0.45, origin.z);
+    if (!top_down_) {
+      glColor3f(0.12F, 0.4F, gizmo_drag_ == GizmoAxis::z ? 1.0F : 0.95F);
+      glVertex3d(origin.x, origin.y, origin.z); glVertex3d(origin.x, origin.y, origin.z + 0.45);
+    }
+    glEnd();
+    glPointSize(11.0F); glBegin(GL_POINTS);
+    glColor3f(1, 0.15F, 0.15F); glVertex3d(origin.x + 0.45, origin.y, origin.z);
+    glColor3f(0.15F, 1, 0.2F); glVertex3d(origin.x, origin.y + 0.45, origin.z);
+    if (!top_down_) { glColor3f(0.15F, 0.45F, 1); glVertex3d(origin.x, origin.y, origin.z + 0.45); }
+    glEnd();
+    glEnable(GL_DEPTH_TEST);
   }
 
   void draw_overlay(int width, int height) {
@@ -663,45 +771,68 @@ class CalibrationApp {
     if (top_down_) draw_topdown_labels(width, height);
     glColor4f(0.055F, 0.065F, 0.085F, 0.98F);
     glBegin(GL_QUADS); glVertex2d(width - panel_width, 0); glVertex2d(width, 0); glVertex2d(width, height); glVertex2d(width - panel_width, height); glEnd();
-    glColor3f(0.75F, 0.9F, 1.0F);
-    double x = width - panel_width + 18, y = 18;
-    draw_text(x, y, "SPECTER-SENSE", 2.2); y += 24;
-    glColor3f(0.45F, 0.7F, 0.85F); draw_text(x, y, top_down_ ? "TOP-DOWN EDIT" : "3D PERSPECTIVE", 1.6); y += 25;
-    glColor3f(0.8F, 0.82F, 0.86F); draw_text(x, y, status_.substr(0, 38), 1.2); y += 28;
-    if (renaming_) { glColor3f(1, 0.8F, 0.2F); draw_text(x, y, "RENAME: " + rename_buffer_ + "_", 1.5); y += 24; }
+    const double x = width - panel_width + 16;
+    glColor3f(0.75F, 0.9F, 1.0F); draw_text(x, 16, "SPECTER-SENSE", 2.2);
+    glColor3f(0.8F, 0.82F, 0.86F); draw_text(x, 48, status_.substr(0, 42), 1.15);
+    draw_button(x, 88, 142, 30, "PERSPECTIVE", !top_down_);
+    draw_button(x + 152, 88, 142, 30, "TOP-DOWN", top_down_);
+    draw_button(x, 126, 142, 30, frozen_ ? "RESUME LIVE" : "FREEZE FRAME", frozen_);
+    draw_button(x + 152, 126, 142, 30, "ESTIMATE FLOOR", false);
+    draw_button(x, 164, 142, 30, live_validation_ ? "VALIDATION ON" : "VALIDATION OFF", live_validation_);
+    draw_button(x + 152, 164, 68, 30, "UNDO", false);
+    draw_button(x + 226, 164, 68, 30, "REDO", false);
+    draw_button(x, 202, 68, 30, "PREV", false);
+    draw_button(x + 74, 202, 68, 30, "NEXT", false);
+    draw_button(x + 152, 202, 68, 30, "RENAME", renaming_);
+    draw_button(x + 226, 202, 68, 30, "COPY", false);
+    draw_button(x, 238, 294, 30, "DELETE SELECTED ZONE", false, true);
+    if (renaming_) {
+      glColor3f(1, 0.82F, 0.25F); draw_text(x, 280, "NAME: " + rename_buffer_ + "_", 1.4);
+      draw_button(x, 316, 135, 30, "APPLY NAME", false);
+      draw_button(x + 145, 316, 135, 30, "CANCEL", false);
+    }
+    double y = renaming_ ? 360 : 284;
     if (selected_ >= 0 && selected_ < static_cast<int>(config_.zones.size())) {
       const auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
-      glColor3f(1, 0.65F, 0.2F); draw_text(x, y, "ZONE: " + zone.name, 1.7); y += 24;
+      glColor3f(1, 0.65F, 0.2F); draw_text(x, y, "ZONE: " + zone.name, 1.6); y += 22;
       glColor3f(0.78F, 0.82F, 0.86F);
-      draw_text(x, y, "VERTICES: " + std::to_string(zone.floor_polygon.size()), 1.3); y += 18;
-      draw_text(x, y, "MIN Z: " + short_number(zone.min_height_m) + " M", 1.3); y += 18;
-      draw_text(x, y, "MAX Z: " + short_number(zone.max_height_m) + " M", 1.3); y += 18;
-      draw_text(x, y, "ENTER: " + std::to_string(zone.enter_points), 1.3); y += 18;
-      draw_text(x, y, "EXIT: " + std::to_string(zone.exit_points), 1.3); y += 18;
-      draw_text(x, y, "ENTER MS: " + std::to_string(zone.enter_after.count()), 1.3); y += 18;
-      draw_text(x, y, "EXIT MS: " + std::to_string(zone.exit_after.count()), 1.3); y += 18;
+      draw_text(x, y, "HEIGHT: " + short_number(zone.min_height_m) + " TO " + short_number(zone.max_height_m) + " M", 1.25); y += 20;
+      if (selected_vertex_ >= 0) {
+        draw_text(x, y, std::string("CORNER: ") + (selected_top_ ? "TOP " : "BOTTOM ") + std::to_string(selected_vertex_ + 1), 1.25); y += 20;
+      }
       if (live_validation_ && static_cast<std::size_t>(selected_) < zone_states_.size()) {
         const auto& state = zone_states_[static_cast<std::size_t>(selected_)];
         glColor3f(state.occupied ? 0.2F : 0.75F, state.occupied ? 1.0F : 0.75F, 0.25F);
-        draw_text(x, y, state.occupied ? "OCCUPIED" : "CLEAR", 1.8); y += 22;
-        draw_text(x, y, "SCORE: " + short_number(state.occupancy_score), 1.3); y += 18;
-        draw_text(x, y, "POINTS: " + std::to_string(state.foreground_points), 1.3); y += 18;
+        draw_text(x, y, (state.occupied ? "OCCUPIED  " : "CLEAR  ") + std::to_string(state.foreground_points) + " PTS", 1.3); y += 20;
       }
-      draw_height_slider(width, height, zone);
-    } else { glColor3f(0.7F, 0.7F, 0.72F); draw_text(x, y, "NO ZONE SELECTED", 1.5); y += 25; }
+      draw_stepper(x, 388, "ENTER POINTS", std::to_string(zone.enter_points));
+      draw_stepper(x, 426, "EXIT POINTS", std::to_string(zone.exit_points));
+      draw_stepper(x, 464, "ENTER DELAY", std::to_string(zone.enter_after.count()) + " MS");
+      draw_stepper(x, 502, "EXIT DELAY", std::to_string(zone.exit_after.count()) + " MS");
+    } else { glColor3f(0.7F, 0.7F, 0.72F); draw_text(x, y, "NO ZONE SELECTED", 1.5); }
     glColor3f(0.62F, 0.68F, 0.75F);
-    if (show_help_) {
-      const std::vector<std::string> help{
-          "T  TOP-DOWN / 3D", "SPACE  FREEZE FRAME", "F  ESTIMATE FLOOR", "N  DRAW NEW ZONE",
-          "TAB  SELECT NEXT", "SHIFT-DRAG  MOVE ZONE", "R  RENAME", "CTRL-D  DUPLICATE",
-          "DELETE  REMOVE", "[ ]  MIN HEIGHT", "; '  MAX HEIGHT", "- +  ENTER POINTS",
-          ", .  EXIT POINTS", "9 0  ENTER DELAY", "7 8  EXIT DELAY", "V  LIVE VALIDATION",
-          "CTRL-Z  UNDO", "CTRL-S  SAVE PREVIEW", "RIGHT-DRAG  PAN", "WHEEL  ZOOM",
-          "ALT-ARROWS  MOVE FRAME", "ALT-I/K J/L U/O  ROTATE", "H  HIDE HELP"};
-      y = std::max(y + 14, 430.0);
-      for (const auto& line : help) { draw_text(x, y, line, 1.15); y += 16; }
-    } else { draw_text(x, height - 30, "H  SHOW CONTROLS", 1.3); }
+    draw_text(x, height - 128, "CTRL+N  NEW BOUNDING BOX", 1.35);
+    draw_text(x, height - 106, "CLICK CORNER, DRAG X/Y/Z", 1.25);
+    draw_text(x, height - 86, "LEFT ORBIT  RIGHT PAN  WHEEL ZOOM", 1.05);
+    draw_button(x, height - 52, 294, 34, "REVIEW AND SAVE", false);
     if (save_preview_) draw_save_preview(width, height);
+  }
+
+  void draw_button(double x, double y, double width, double height, const std::string& label,
+                   bool active, bool danger = false) {
+    if (danger) glColor3f(0.38F, 0.1F, 0.12F);
+    else if (active) glColor3f(0.12F, 0.38F, 0.5F);
+    else glColor3f(0.13F, 0.16F, 0.21F);
+    glBegin(GL_QUADS); glVertex2d(x, y); glVertex2d(x + width, y); glVertex2d(x + width, y + height); glVertex2d(x, y + height); glEnd();
+    glColor3f(danger ? 1.0F : 0.78F, danger ? 0.55F : 0.84F, danger ? 0.55F : 0.9F);
+    const double scale = width < 90 ? 1.0 : 1.15;
+    draw_text(x + 8, y + (height - 7 * scale) * 0.5, label, scale);
+  }
+
+  void draw_stepper(double x, double y, const std::string& label, const std::string& value) {
+    draw_button(x, y, 34, 26, "-", false);
+    glColor3f(0.75F, 0.8F, 0.86F); draw_text(x + 46, y + 2, label, 1.05); draw_text(x + 150, y + 2, value, 1.05);
+    draw_button(x + 260, y, 34, 26, "+", false);
   }
 
   void draw_topdown_labels(int width, int height) {
@@ -713,7 +844,7 @@ class CalibrationApp {
       for (const auto point : zone.floor_polygon) { center.x += point.x; center.y += point.y; }
       center.x /= static_cast<double>(zone.floor_polygon.size());
       center.y /= static_cast<double>(zone.floor_polygon.size());
-      const double screen_x = ((center.x - pan_x_) / (top_scale_ * aspect) + 1.0) * 0.5 * viewport_width;
+      const double screen_x = viewport_width - ((center.x - pan_x_) / (top_scale_ * aspect) + 1.0) * 0.5 * viewport_width;
       const double screen_y = (1.0 - (center.y - pan_y_) / top_scale_) * 0.5 * height;
       glColor3f(static_cast<int>(index) == selected_ ? 1.0F : 0.65F,
                 static_cast<int>(index) == selected_ ? 0.7F : 0.85F, 0.25F);
@@ -723,16 +854,6 @@ class CalibrationApp {
 
   static std::string short_number(double value) {
     std::ostringstream out; out.setf(std::ios::fixed); out.precision(2); out << value; return out.str();
-  }
-
-  void draw_height_slider(int width, int height, const specter::ZoneConfig& zone) {
-    const double x = width - 38;
-    const auto y_for = [&](double value) { return height - 80.0 - (value / 3.0) * (height - 180.0); };
-    glColor3f(0.3F, 0.35F, 0.42F); glLineWidth(5); glBegin(GL_LINES); glVertex2d(x, 100); glVertex2d(x, height - 80); glEnd();
-    glPointSize(13); glBegin(GL_POINTS);
-    glColor3f(0.2F, 0.75F, 1); glVertex2d(x, y_for(zone.min_height_m));
-    glColor3f(1, 0.55F, 0.15F); glVertex2d(x, y_for(zone.max_height_m));
-    glEnd();
   }
 
   void draw_save_preview(int width, int height) {
@@ -746,8 +867,8 @@ class CalibrationApp {
         ? "ROOM TRANSFORM: UNCHANGED" : "ROOM TRANSFORM: CHANGED", 1.5);
     draw_text(125, 265, specter::serialize_config(original_) == specter::serialize_config(config_)
         ? "CONTENT: NO CHANGES" : "CONTENT: MODIFIED", 1.5);
-    glColor3f(0.3F, 1, 0.45F); draw_text(125, height - 155, "ENTER  ATOMICALLY REPLACE CONFIG", 1.7);
-    glColor3f(1, 0.45F, 0.35F); draw_text(125, height - 125, "ESC  CANCEL", 1.7);
+    draw_button(125, height - 175, 360, 35, "ATOMICALLY REPLACE CONFIG", true);
+    draw_button(510, height - 175, 180, 35, "CANCEL", false, true);
   }
 
   Options options_;
@@ -763,13 +884,13 @@ class CalibrationApp {
   std::vector<specter::ZoneState> zone_states_;
   std::vector<specter::AppConfig> undo_, redo_;
   specter::AppConfig edit_before_;
-  std::vector<specter::Point2> draft_;
   std::string status_{"STARTING"};
   std::string rename_buffer_;
-  bool frozen_{}, top_down_{}, drawing_{}, left_down_{}, right_down_{}, translating_{}, renaming_{}, save_preview_{};
-  bool live_validation_{}, show_help_{true};
-  int selected_{-1}, edit_vertex_{-1};
-  HeightDrag height_drag_{HeightDrag::none};
+  bool frozen_{}, top_down_{}, left_down_{}, right_down_{}, translating_{}, corner_click_{}, renaming_{}, save_preview_{};
+  bool live_validation_{};
+  int selected_{-1}, selected_vertex_{-1};
+  bool selected_top_{};
+  GizmoAxis gizmo_drag_{GizmoAxis::none};
   double mouse_x_{}, mouse_y_{};
   double orbit_yaw_{0.6}, orbit_pitch_{0.45}, orbit_distance_{4.0};
   double target_x_{}, target_y_{1.5}, target_z_{0.7};

@@ -67,7 +67,7 @@ Only the depth stream is requested. Startup and reconnect events go to stderr as
 
 ## Room coordinates and calibration
 
-Persisted zones are metric room geometry, never perspective-bound image masks. Coordinates use metres with `x` and `y` on the floor and `z` upward. `camera_to_room` is a row-major 4x4 rigid transform:
+Persisted zones are metric room geometry, never perspective-bound image masks. Coordinates use metres with `x` and `y` on the floor and `z` upward. `camera_to_room` is a row-major 4x4 affine calibration transform:
 
 ```text
 [ r00 r01 r02 tx
@@ -76,7 +76,7 @@ Persisted zones are metric room geometry, never perspective-bound image masks. C
     0   0   0  1 ]
 ```
 
-Depth pixels are first deprojected using the Kinect IR intrinsics, producing camera coordinates (`x` right, `y` down, `z` forward), and then multiplied by this transform. The example transform maps camera forward to room `y`, camera up to room `z`, and places the camera one metre above the floor.
+Depth pixels are first deprojected using the Kinect IR intrinsics, producing right-handed camera coordinates (`x` right, `y` down, `z` forward), and then multiplied by this transform. The calibration viewport mirrors its horizontal screen projection without reflecting the underlying room geometry, so point-cloud display, zone picking, and gizmos agree while runtime coordinates remain well-formed. The example transform maps camera forward to room `y`, camera up to room `z`, and places the camera one metre above the floor.
 
 For an initial hand calibration:
 
@@ -99,33 +99,26 @@ LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib \
   --config config/specter-sense.local.json
 ```
 
-Use `--source synthetic` to learn the editor without the camera. The utility never requests RGB and does not persist depth frames. Space freezes a representative depth point cloud in memory while geometry is edited.
+Use `--source synthetic` to learn the editor without the camera. The utility never requests RGB and does not persist depth frames. The side panel can freeze a representative depth point cloud in memory while geometry is edited.
 
 Suggested bedroom-mapping workflow:
 
 1. Aim the Kinect so a useful patch of floor and the relevant occupied volumes are visible.
-2. Press `Space` to freeze a clear frame, then `F` to estimate the floor plane. Inspect the colored room axes and point cloud. Correct the transform with the `Alt` controls if needed.
-3. Press `T` for top-down editing, then `N`. Click the corners of a physical room region and press `Enter`.
-4. Drag vertices to reshape it. Shift-drag inside the polygon to translate it. Drag the blue/orange height handles on the right to set its floor and ceiling.
-5. Press `R` to rename it. Duplicate similar regions with `Ctrl+D`; select overlapping/adjacent zones with `Tab`.
-6. Press `V` for live foreground and occupancy validation, then tune evidence thresholds and delays with the displayed shortcuts.
-7. Press `Ctrl+S`. Review the destination, zone-count, transform, and content-change preview; press `Enter` to validate and atomically replace the config, or `Esc` to cancel.
+2. Click **Freeze Frame**, then **Estimate Floor**. Inspect the colored room axes and point cloud.
+3. Press `Ctrl+N`, the editor's only command shortcut, to create a one-metre-square, two-metre-high bounding box at the current view target.
+4. Click any top or bottom corner. Drag the red, green, or blue gizmo axis to change that corner's room X, Y, or Z coordinate. Moving a top/bottom corner on Z adjusts the corresponding height plane.
+5. Use the panel to switch perspective/top-down views, rename, duplicate, delete, select, undo, and redo. In top-down mode, drag inside a selected zone to translate the whole footprint.
+6. Click **Validation** to overlay live foreground evidence and display occupancy. Tune evidence thresholds and delays with the panel's minus/plus controls.
+7. Click **Review and Save**. Inspect the destination and structured change preview, then click the atomic replacement button or cancel.
 
 Viewport and editing controls:
 
-- Left-drag: orbit in perspective; drag a vertex in top-down mode
+- Left-drag empty space: orbit in perspective
+- Click a corner, then drag the red/green/blue X/Y/Z gizmo
+- Drag inside a selected top-down polygon: translate the entire zone
 - Right-drag: pan; mouse wheel: zoom
-- `T`: perspective/top-down mode; `Space`: freeze/live depth
-- `F`: estimate floor plane using RANSAC
-- `Alt+Arrow`/`Alt+PageUp`/`Alt+PageDown`: translate room frame
-- `Alt+I/K`, `Alt+J/L`, `Alt+U/O`: rotate room frame; hold Shift for larger increments
-- `N`: draw zone; `Enter`: finish; `Esc`: cancel
-- Shift-drag: translate selected zone; `R`: rename; `Ctrl+D`: duplicate; Delete: remove
-- Blue/orange side handles or `[`/`]` and `;`/`'`: minimum/maximum height
-- `-`/`+`: enter evidence; `,`/`.`: exit evidence
-- `9`/`0`: enter delay; `7`/`8`: exit delay
-- `V`: live validation; `Ctrl+Z`/`Ctrl+Shift+Z`: undo/redo
-- `Ctrl+S`: save preview; `H`: toggle the on-screen help
+- `Ctrl+N`: create a new bounding box
+- Every other editor action is a clickable panel control
 
 The editor rejects duplicate names, too-small or self-intersecting polygons, adjacent duplicate vertices, reversed/unreasonable height bounds, and coordinates outside ±50 metres before saving.
 

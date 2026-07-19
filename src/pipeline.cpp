@@ -16,6 +16,15 @@ Point3 transform_point(const Transform& transform, const Point3& point) {
       m[8] * point.x + m[9] * point.y + m[10] * point.z + m[11]};
 }
 
+Point3 deproject_depth(const Intrinsics& intrinsics, double pixel_x, double pixel_y, double depth_m) {
+  if (!(intrinsics.fx > 0 && intrinsics.fy > 0) || !(depth_m > 0) || !std::isfinite(depth_m))
+    throw std::runtime_error("cannot deproject invalid depth or intrinsics");
+  return {
+      (pixel_x - intrinsics.cx) * depth_m / intrinsics.fx,
+      (pixel_y - intrinsics.cy) * depth_m / intrinsics.fy,
+      depth_m};
+}
+
 bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon) {
   bool inside = false;
   for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
@@ -73,10 +82,7 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
     }
     const auto u = static_cast<double>(index % frame.width);
     const auto v = static_cast<double>(index / frame.width);
-    const Point3 camera{
-        (u - frame.intrinsics.cx) * depth_m / frame.intrinsics.fx,
-        (v - frame.intrinsics.cy) * depth_m / frame.intrinsics.fy,
-        depth_m};
+    const Point3 camera = deproject_depth(frame.intrinsics, u, v, depth_m);
     const Point3 room = transform_point(config_.camera_to_room, camera);
     if (retain_foreground_points_) last_foreground_points_.push_back(room);
     for (std::size_t zone_index = 0; zone_index < config_.zones.size(); ++zone_index) {

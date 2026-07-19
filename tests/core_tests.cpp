@@ -46,6 +46,9 @@ void geometry_test() {
   transform.matrix = {1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3, 0, 0, 0, 1};
   const auto point = specter::transform_point(transform, {1, 2, 3});
   require(point.x == 2 && point.y == 4 && point.z == 6, "transform is incorrect");
+  const auto left = specter::deproject_depth({100, 100, 50, 40}, 25, 40, 2);
+  const auto right = specter::deproject_depth({100, 100, 50, 40}, 75, 40, 2);
+  require(left.x < 0 && right.x > 0, "depth deprojection changed camera-space handedness");
 }
 
 void pipeline_test() {
