@@ -12,9 +12,10 @@ bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon);
 
 class OccupancyPipeline {
  public:
-  explicit OccupancyPipeline(AppConfig config);
+  explicit OccupancyPipeline(AppConfig config, bool retain_foreground_points = false);
   std::vector<ZoneState> process(const DepthFrame& frame);
   std::size_t frames_seen() const { return frames_seen_; }
+  const std::vector<Point3>& last_foreground_points() const { return last_foreground_points_; }
 
  private:
   struct ZoneRuntime {
@@ -30,6 +31,8 @@ class OccupancyPipeline {
   std::size_t width_{};
   std::size_t height_{};
   std::size_t frames_seen_{};
+  bool retain_foreground_points_{};
+  std::vector<Point3> last_foreground_points_;
 };
 
 }  // namespace specter

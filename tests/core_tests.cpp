@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -72,6 +73,31 @@ void validation_test() {
     rejected = true;
   }
   require(rejected, "duplicate zone names were accepted");
+
+  config = test_config();
+  config.zones[0].floor_polygon = {{0, 0}, {1, 1}, {0, 1}, {1, 0}};
+  rejected = false;
+  try {
+    specter::validate_config(config);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  require(rejected, "self-intersecting polygon was accepted");
+}
+
+void config_round_trip_test() {
+  const auto config = test_config();
+  const auto text = specter::serialize_config(config);
+  const auto json = boost::json::parse(text).as_object();
+  require(json.at("camera_to_room").as_array().size() == 16, "serialized transform size mismatch");
+  require(json.at("zones").as_array().front().as_object().at("name").as_string() == "room",
+          "serialized zone mismatch");
+  const auto path = std::filesystem::temp_directory_path() /
+      ("specter-sense-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
+  specter::save_config_atomic(path, config);
+  const auto loaded = specter::load_config(path);
+  std::filesystem::remove(path);
+  require(loaded.zones.size() == 1 && loaded.zones.front().name == "room", "atomic config round-trip failed");
 }
 
 void json_test() {
@@ -92,6 +118,7 @@ int main() {
     geometry_test();
     pipeline_test();
     validation_test();
+    config_round_trip_test();
     json_test();
     std::cout << "all core tests passed\n";
   } catch (const std::exception& error) {

@@ -28,8 +28,9 @@ bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon) {
   return inside;
 }
 
-OccupancyPipeline::OccupancyPipeline(AppConfig config)
-    : config_(std::move(config)), runtime_(config_.zones.size()) {
+OccupancyPipeline::OccupancyPipeline(AppConfig config, bool retain_foreground_points)
+    : config_(std::move(config)), runtime_(config_.zones.size()),
+      retain_foreground_points_(retain_foreground_points) {
   validate_config(config_);
 }
 
@@ -53,6 +54,7 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
     double far_m{};
   };
   std::vector<Evidence> evidence(config_.zones.size());
+  last_foreground_points_.clear();
   const auto& p = config_.processing;
 
   for (std::size_t index = 0; index < frame.depth_mm.size(); ++index) {
@@ -76,6 +78,7 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
         (v - frame.intrinsics.cy) * depth_m / frame.intrinsics.fy,
         depth_m};
     const Point3 room = transform_point(config_.camera_to_room, camera);
+    if (retain_foreground_points_) last_foreground_points_.push_back(room);
     for (std::size_t zone_index = 0; zone_index < config_.zones.size(); ++zone_index) {
       const auto& zone = config_.zones[zone_index];
       if (room.z < zone.min_height_m || room.z > zone.max_height_m ||

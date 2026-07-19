@@ -30,6 +30,8 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+The optional calibration executable also requires the Debian `libglfw3-dev` and OpenGL development packages. If they are absent, CMake reports that condition and still builds the dependency-light headless service.
+
 `FREENECT2_ROOT` must contain `include/libfreenect2` and either `lib`, `build/lib`, or an otherwise discoverable `libfreenect2` library. If it is omitted and the library cannot be found, CMake still builds a synthetic-only binary.
 
 When using an uninstalled source build, its shared library may need to be exposed at runtime:
@@ -83,7 +85,49 @@ For an initial hand calibration:
 3. Define each zone as a floor polygon in room `(x, y)` coordinates plus `min_height_m` and `max_height_m`.
 4. Run against recorded/synthetic or live depth and tune the transform before tuning occupancy thresholds.
 
-Automatic floor-plane fitting and a calibration UI are future work. The configuration contract already supports a floor-derived transform without changing zone definitions.
+The interactive tool below provides automatic floor-plane fitting plus manual correction. Its saved transform uses this same canonical configuration contract.
+
+## Interactive calibration tool
+
+`specter-sense-calibrate` is a separate GLFW/OpenGL utility. It reuses the service's Kinect source, depth deprojection, room transform, configuration validation, occupancy pipeline, and atomic config writer. The headless executable does not depend on the calibrator at runtime.
+
+```sh
+cp config/specter-sense.example.json config/specter-sense.local.json
+LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib \
+  ./build/specter-sense-calibrate \
+  --source kinect \
+  --config config/specter-sense.local.json
+```
+
+Use `--source synthetic` to learn the editor without the camera. The utility never requests RGB and does not persist depth frames. Space freezes a representative depth point cloud in memory while geometry is edited.
+
+Suggested bedroom-mapping workflow:
+
+1. Aim the Kinect so a useful patch of floor and the relevant occupied volumes are visible.
+2. Press `Space` to freeze a clear frame, then `F` to estimate the floor plane. Inspect the colored room axes and point cloud. Correct the transform with the `Alt` controls if needed.
+3. Press `T` for top-down editing, then `N`. Click the corners of a physical room region and press `Enter`.
+4. Drag vertices to reshape it. Shift-drag inside the polygon to translate it. Drag the blue/orange height handles on the right to set its floor and ceiling.
+5. Press `R` to rename it. Duplicate similar regions with `Ctrl+D`; select overlapping/adjacent zones with `Tab`.
+6. Press `V` for live foreground and occupancy validation, then tune evidence thresholds and delays with the displayed shortcuts.
+7. Press `Ctrl+S`. Review the destination, zone-count, transform, and content-change preview; press `Enter` to validate and atomically replace the config, or `Esc` to cancel.
+
+Viewport and editing controls:
+
+- Left-drag: orbit in perspective; drag a vertex in top-down mode
+- Right-drag: pan; mouse wheel: zoom
+- `T`: perspective/top-down mode; `Space`: freeze/live depth
+- `F`: estimate floor plane using RANSAC
+- `Alt+Arrow`/`Alt+PageUp`/`Alt+PageDown`: translate room frame
+- `Alt+I/K`, `Alt+J/L`, `Alt+U/O`: rotate room frame; hold Shift for larger increments
+- `N`: draw zone; `Enter`: finish; `Esc`: cancel
+- Shift-drag: translate selected zone; `R`: rename; `Ctrl+D`: duplicate; Delete: remove
+- Blue/orange side handles or `[`/`]` and `;`/`'`: minimum/maximum height
+- `-`/`+`: enter evidence; `,`/`.`: exit evidence
+- `9`/`0`: enter delay; `7`/`8`: exit delay
+- `V`: live validation; `Ctrl+Z`/`Ctrl+Shift+Z`: undo/redo
+- `Ctrl+S`: save preview; `H`: toggle the on-screen help
+
+The editor rejects duplicate names, too-small or self-intersecting polygons, adjacent duplicate vertices, reversed/unreasonable height bounds, and coordinates outside ±50 metres before saving.
 
 ## Processing configuration
 
