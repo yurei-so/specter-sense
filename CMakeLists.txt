@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(specter_sense_core
   src/boost_json.cpp
   src/config.cpp
+  src/environment.cpp
   src/pipeline.cpp
   src/socket_publisher.cpp
   src/state_writer.cpp

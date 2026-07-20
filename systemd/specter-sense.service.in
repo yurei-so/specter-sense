@@ -1,0 +1,14 @@
+[Unit]
+Description=Specter Sense occupancy sensor
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@REPO_DIR@/.env
+ExecStart=@BINARY@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

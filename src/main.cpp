@@ -1,4 +1,5 @@
 #include "specter_sense/config.hpp"
+#include "specter_sense/environment.hpp"
 #include "specter_sense/frame_source.hpp"
 #include "specter_sense/pipeline.hpp"
 #include "specter_sense/socket_publisher.hpp"
@@ -40,7 +41,24 @@ std::filesystem::path default_socket_path() {
 
 Options parse_options(int argc, char** argv) {
   Options options;
+  const char* env_file = std::getenv("SPECTER_SENSE_ENV");
+  specter::load_dotenv_if_present(env_file && *env_file ? env_file : ".env");
+  auto environment = [](const char* name) -> std::optional<std::string> {
+    if (const char* value = std::getenv(name)) return std::string(value);
+    return std::nullopt;
+  };
+  if (const auto value = environment("SPECTER_SENSE_CONFIG"); value && !value->empty()) options.config = *value;
+  if (const auto value = environment("SPECTER_SENSE_SOURCE"); value && !value->empty()) options.source = *value;
+  if (const auto value = environment("SPECTER_SENSE_OUTPUT"); value && !value->empty()) options.output = *value;
   options.socket = default_socket_path();
+  if (const auto value = environment("SPECTER_SENSE_SOCKET"); value && !value->empty()) {
+    if (*value == "off" || *value == "none") options.socket.reset();
+    else options.socket = *value;
+  }
+  if (const auto value = environment("SPECTER_SENSE_SOCKET_INTERVAL_MS"); value && !value->empty())
+    options.socket_interval = std::chrono::milliseconds(std::stoll(*value));
+  if (const auto value = environment("SPECTER_SENSE_FRAMES"); value && !value->empty())
+    options.frames = static_cast<std::size_t>(std::stoull(*value));
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto value = [&]() -> std::string {
@@ -58,7 +76,8 @@ Options parse_options(int argc, char** argv) {
     else if (arg == "--help") {
       std::cout << "Usage: specter-sense [--config PATH] [--output PATH|--no-state-file] "
                    "[--socket PATH|--no-socket] [--socket-interval-ms N] "
-                   "[--source synthetic|kinect] [--frames N]\n";
+                   "[--source synthetic|kinect] [--frames N]\n"
+                   "Defaults are read from .env (or $SPECTER_SENSE_ENV); command-line options win.\n";
       std::exit(0);
     } else throw std::runtime_error("unknown argument: " + arg);
   }

@@ -45,22 +45,19 @@ export LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib${LD_LIBRARY_PATH:+:$LD
 The synthetic scene warms up with an empty background, introduces a nearer rectangular object, and then removes it. It exercises the same processing and publication path as the Kinect source:
 
 ```sh
-./build/specter-sense \
-  --source synthetic \
-  --frames 120 \
-  --config config/specter-sense.example.json \
-  --output state/specter-sense.json
+cp .env.example .env
+./build/specter-sense --frames 120
 ```
 
-Omit `--frames` to run until `SIGINT` or `SIGTERM`.
+The active source, room configuration, socket, and optional state output live in the ignored `.env` file. Command-line options remain available for one-off overrides and take precedence over `.env`. Set `SPECTER_SENSE_ENV=/path/to/file` to use a different environment file. Omit `--frames` to run until `SIGINT` or `SIGTERM`.
 
 ## Run with Kinect V2
 
 ```sh
-./build/specter-sense \
-  --source kinect \
-  --config config/specter-sense.local.json \
-  --output state/specter-sense.json
+cp config/specter-sense.example.json config/specter-sense.local.json
+cp .env.example .env
+# Edit .env: select kinect and config/specter-sense.local.json.
+./build/specter-sense
 ```
 
 Only the depth stream is requested. Startup and reconnect events go to stderr as one-line JSON. After three consecutive frame timeouts the device is reopened with exponential backoff capped at 32 seconds. Socket state—and the optional state file when enabled—reports timeout, stale, and reconnect conditions instead of retaining a silently healthy sensor state.
@@ -93,10 +90,10 @@ The interactive tool below provides automatic floor-plane fitting plus manual co
 
 ```sh
 cp config/specter-sense.example.json config/specter-sense.local.json
+cp .env.example .env
+# Point SPECTER_SENSE_CONFIG at the local JSON and select the desired source.
 LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib \
-  ./build/specter-sense-calibrate \
-  --source kinect \
-  --config config/specter-sense.local.json
+  ./build/specter-sense-calibrate
 ```
 
 Use `--source synthetic` to learn the editor without the camera. The utility never requests RGB and does not persist depth frames. The side panel can freeze a representative depth point cloud in memory while geometry is edited.
@@ -176,6 +173,32 @@ When `XDG_RUNTIME_DIR` is unavailable, connect to `/tmp/specter-sense-$(id -u).s
 ```
 
 Slow or abandoned consumers are disconnected once their pending output exceeds 1 MiB, preventing them from stalling depth processing.
+
+## User service and tray indicator
+
+After building, generate relocatable-to-this-checkout user units:
+
+```sh
+./scripts/systemd-user-service.sh
+```
+
+The generated files land in `build/systemd/` for review. To install and start both the sensor and its tray indicator:
+
+```sh
+./scripts/systemd-user-service.sh --install
+```
+
+The helper creates `.env` from `.env.example` when it is absent, installs only into the current user's systemd directory, reloads the user manager, and enables both units. Use `--no-start` to enable without starting them yet. Re-run the helper after moving the checkout because the generated units contain absolute paths.
+
+The tray icon reads the authenticated Unix socket and shows four states: green for streaming with clear zones, blue when one or more zones are occupied, orange for a timeout/reconnect problem, and gray when the service is stopped. Left-click toggles `specter-sense.service`; the menu provides the same start/stop action. It requires Python 3, PyGObject, GTK 3, and a desktop that displays legacy status icons (some GNOME setups require an AppIndicator/status-icon extension).
+
+Useful service commands:
+
+```sh
+systemctl --user status specter-sense.service
+systemctl --user restart specter-sense.service
+journalctl --user -u specter-sense.service -f
+```
 
 ## Optional state file
 

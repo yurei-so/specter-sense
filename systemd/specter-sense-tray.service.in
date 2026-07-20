@@ -1,0 +1,15 @@
+[Unit]
+Description=Specter Sense tray indicator
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@REPO_DIR@/.env
+ExecStart=@TRAY@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

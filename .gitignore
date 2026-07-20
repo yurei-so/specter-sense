@@ -1,5 +1,7 @@
 /build/
 /state/
+.env
+__pycache__/
 *.tmp
 /config/specter-sense.local.json
 config/yurei_testing_room.json

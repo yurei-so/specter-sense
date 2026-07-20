@@ -1,4 +1,5 @@
 #include "specter_sense/config.hpp"
+#include "specter_sense/environment.hpp"
 #include "specter_sense/frame_source.hpp"
 #include "specter_sense/pipeline.hpp"
 
@@ -10,6 +11,7 @@
 #include <chrono>
 #include <csignal>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -106,6 +108,10 @@ struct Options {
 
 Options parse_options(int argc, char** argv) {
   Options options;
+  const char* env_file = std::getenv("SPECTER_SENSE_ENV");
+  specter::load_dotenv_if_present(env_file && *env_file ? env_file : ".env");
+  if (const char* value = std::getenv("SPECTER_SENSE_CONFIG"); value && *value) options.config = value;
+  if (const char* value = std::getenv("SPECTER_SENSE_SOURCE"); value && *value) options.source = value;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto value = [&]() -> std::string {
