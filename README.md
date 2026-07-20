@@ -210,6 +210,12 @@ The helper creates `.env` from `.env.example` when it is absent, installs only i
 
 The tray icon reads the authenticated Unix socket and shows four states: green for streaming with clear zones, blue when one or more zones are occupied, orange for a timeout/reconnect problem, and gray when the service is stopped. Left-click toggles `specter-sense.service`; the menu provides the same start/stop action. It requires Python 3 and PyQt6, and uses Qt's native system-tray/StatusNotifier integration on Plasma and other supported desktops.
 
+The enabled tray unit belongs to the user manager's `default.target`, not to
+the sensor service. Stopping the sensor from the tray therefore leaves the tray
+controller running, and an enabled tray controller is started again when the
+user manager starts. It waits until the graphical session exposes a system tray
+before showing the icon.
+
 Useful service commands:
 
 ```sh

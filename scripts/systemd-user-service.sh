@@ -52,9 +52,12 @@ if [[ "$install_units" == true ]]; then
   install -m 0644 "$output_dir/specter-sense-tray.service" "$unit_dir/specter-sense-tray.service"
   systemctl --user daemon-reload
   if [[ "$start_units" == true ]]; then
-    systemctl --user enable --now specter-sense.service specter-sense-tray.service
+    systemctl --user enable --now specter-sense.service
+    systemctl --user reenable specter-sense-tray.service
+    systemctl --user start specter-sense-tray.service
   else
-    systemctl --user enable specter-sense.service specter-sense-tray.service
+    systemctl --user enable specter-sense.service
+    systemctl --user reenable specter-sense-tray.service
   fi
   echo "Installed user units. Toggle the sensor with the tray icon or systemctl --user start/stop specter-sense."
 fi
