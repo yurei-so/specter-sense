@@ -1,18 +1,19 @@
 #!/usr/bin/python3
-"""Small GTK status icon for the specter-sense user service."""
+"""Qt/StatusNotifier tray indicator for the specter-sense user service."""
 
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 
-import gi
-
-gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk  # noqa: E402
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 
 SERVICE = "specter-sense.service"
@@ -56,36 +57,63 @@ def service_active() -> bool:
     return result.returncode == 0
 
 
+class StateBridge(QObject):
+    changed = pyqtSignal(str, str)
+
+
 class Tray:
-    def __init__(self) -> None:
-        self.status = Gtk.StatusIcon()
-        self.status.set_title("specter-sense")
-        self.status.connect("popup-menu", self.show_menu)
-        self.status.connect("activate", self.toggle)
+    def __init__(self, app: QApplication) -> None:
+        self.app = app
         self.state = "stopped"
         self.detail = "Sensor service is stopped"
-        self.update("stopped", self.detail)
+        self.bridge = StateBridge()
+        self.bridge.changed.connect(self.update)
+
+        self.icon = QSystemTrayIcon()
+        self.icon.setContextMenu(self.make_menu())
+        self.icon.activated.connect(self.activated)
+        self.update(self.state, self.detail)
+        self.icon.show()
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.refresh_service)
+        self.timer.start(3000)
         threading.Thread(target=self.watch_socket, daemon=True).start()
-        GLib.timeout_add_seconds(3, self.refresh_service)
 
-    def update(self, state: str, detail: str) -> bool:
+    def make_menu(self) -> QMenu:
+        menu = QMenu()
+        self.summary_action = QAction(self.detail, menu)
+        self.summary_action.setEnabled(False)
+        menu.addAction(self.summary_action)
+        menu.addSeparator()
+        self.toggle_action = QAction("Start sensor", menu)
+        self.toggle_action.triggered.connect(self.toggle)
+        menu.addAction(self.toggle_action)
+        logs_action = QAction("Open recent logs", menu)
+        logs_action.triggered.connect(self.open_logs)
+        menu.addAction(logs_action)
+        menu.addSeparator()
+        quit_action = QAction("Quit tray", menu)
+        quit_action.triggered.connect(self.app.quit)
+        menu.addAction(quit_action)
+        return menu
+
+    def update(self, state: str, detail: str) -> None:
         self.state, self.detail = state, detail
-        icon = ICONS / f"specter-sense-{state}.svg"
-        self.status.set_from_file(str(icon))
-        self.status.set_tooltip_text(f"specter-sense: {detail}")
-        self.status.set_visible(True)
-        return False
+        self.icon.setIcon(QIcon(str(ICONS / f"specter-sense-{state}.svg")))
+        self.icon.setToolTip(f"specter-sense: {detail}")
+        self.summary_action.setText(detail)
+        self.toggle_action.setText("Stop sensor" if service_active() else "Start sensor")
 
-    def refresh_service(self) -> bool:
+    def refresh_service(self) -> None:
         if not service_active() and self.state != "stopped":
             self.update("stopped", "Sensor service is stopped")
-        return True
 
     def watch_socket(self) -> None:
         path = socket_path()
         while True:
             if not service_active():
-                GLib.idle_add(self.update, "stopped", "Sensor service is stopped")
+                self.bridge.changed.emit("stopped", "Sensor service is stopped")
                 time.sleep(1)
                 continue
             try:
@@ -105,35 +133,36 @@ class Tray:
                             detail = "Occupied: " + ", ".join(occupied) if occupied else "Streaming; all zones clear"
                         else:
                             state, detail = "warning", f"Sensor {status.replace('_', ' ')}"
-                        GLib.idle_add(self.update, state, detail)
+                        self.bridge.changed.emit(state, detail)
             except (FileNotFoundError, ConnectionError, OSError, json.JSONDecodeError):
-                GLib.idle_add(self.update, "warning", "Service active; waiting for sensor socket")
+                self.bridge.changed.emit("warning", "Service active; waiting for sensor socket")
                 time.sleep(1)
 
-    def toggle(self, *_args) -> None:
+    def activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle()
+
+    def toggle(self) -> None:
         action = "stop" if service_active() else "start"
         subprocess.Popen(["systemctl", "--user", action, SERVICE])
         self.update("warning", f"Requesting service {action}")
 
-    def show_menu(self, _icon, button: int, activate_time: int) -> None:
-        menu = Gtk.Menu()
-        summary = Gtk.MenuItem(label=self.detail)
-        summary.set_sensitive(False)
-        menu.append(summary)
-        menu.append(Gtk.SeparatorMenuItem())
-        toggle = Gtk.MenuItem(label="Stop sensor" if service_active() else "Start sensor")
-        toggle.connect("activate", self.toggle)
-        menu.append(toggle)
-        logs = Gtk.MenuItem(label="Open recent logs")
-        logs.connect("activate", lambda *_: subprocess.Popen(["journalctl", "--user", "-u", SERVICE, "-f", "-n", "40"]))
-        menu.append(logs)
-        quit_item = Gtk.MenuItem(label="Quit tray")
-        quit_item.connect("activate", lambda *_: Gtk.main_quit())
-        menu.append(quit_item)
-        menu.show_all()
-        menu.popup(None, None, Gtk.StatusIcon.position_menu, self.status, button, activate_time)
+    def open_logs(self) -> None:
+        terminal = shutil.which("konsole") or shutil.which("x-terminal-emulator")
+        if terminal:
+            subprocess.Popen([terminal, "-e", "journalctl", "--user", "-u", SERVICE, "-f", "-n", "40"])
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    app.setApplicationName("specter-sense")
+    app.setQuitOnLastWindowClosed(False)
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("specter-sense tray: no system tray is available in this session", file=sys.stderr)
+        return 1
+    tray = Tray(app)
+    return app.exec()
 
 
 if __name__ == "__main__":
-    Tray()
-    Gtk.main()
+    raise SystemExit(main())

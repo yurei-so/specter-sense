@@ -190,7 +190,7 @@ The generated files land in `build/systemd/` for review. To install and start bo
 
 The helper creates `.env` from `.env.example` when it is absent, installs only into the current user's systemd directory, reloads the user manager, and enables both units. Use `--no-start` to enable without starting them yet. Re-run the helper after moving the checkout because the generated units contain absolute paths.
 
-The tray icon reads the authenticated Unix socket and shows four states: green for streaming with clear zones, blue when one or more zones are occupied, orange for a timeout/reconnect problem, and gray when the service is stopped. Left-click toggles `specter-sense.service`; the menu provides the same start/stop action. It requires Python 3, PyGObject, GTK 3, and a desktop that displays legacy status icons (some GNOME setups require an AppIndicator/status-icon extension).
+The tray icon reads the authenticated Unix socket and shows four states: green for streaming with clear zones, blue when one or more zones are occupied, orange for a timeout/reconnect problem, and gray when the service is stopped. Left-click toggles `specter-sense.service`; the menu provides the same start/stop action. It requires Python 3 and PyQt6, and uses Qt's native system-tray/StatusNotifier integration on Plasma and other supported desktops.
 
 Useful service commands:
 
