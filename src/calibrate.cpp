@@ -219,6 +219,8 @@ class CalibrationApp {
       zone_states_ = pipeline_->process(*frame_);
       foreground_points_ = pipeline_->last_foreground_points();
       track_states_ = pipeline_->last_tracks();
+      ignore_plane_states_ = pipeline_->last_ignore_plane_states();
+      ignored_points_ = pipeline_->last_ignored_points();
     } catch (const std::exception& error) {
       status_ = std::string("PIPELINE: ") + error.what();
     }
@@ -253,12 +255,31 @@ class CalibrationApp {
     rebuild_pipeline();
   }
 
+  void remember_ignore_planes(const specter::AppConfig& before) {
+    undo_.push_back(before);
+    if (undo_.size() > 100) undo_.erase(undo_.begin());
+    redo_.clear();
+    refresh_ignore_planes();
+  }
+
+  void refresh_ignore_planes() {
+    try {
+      pipeline_->set_ignore_planes(config_.ignore_planes);
+      track_states_.clear();
+      status_ = "IGNORE PLANE VALID - RAY MASK WILL REFRESH";
+    } catch (const std::exception& error) {
+      status_ = std::string("INVALID PLANE: ") + error.what();
+    }
+  }
+
   void undo() {
     if (undo_.empty()) return;
     redo_.push_back(config_);
     config_ = undo_.back();
     undo_.pop_back();
     selected_ = config_.zones.empty() ? -1 : std::min(selected_, static_cast<int>(config_.zones.size() - 1));
+    selected_plane_ = config_.ignore_planes.empty() ? -1 :
+        std::min(selected_plane_, static_cast<int>(config_.ignore_planes.size() - 1));
     rebuild_pipeline();
   }
 
@@ -277,6 +298,7 @@ class CalibrationApp {
     }
     const bool control = (mods & GLFW_MOD_CONTROL) != 0;
     if (control && key == GLFW_KEY_N && action == GLFW_PRESS) create_box();
+    else if (control && key == GLFW_KEY_M && action == GLFW_PRESS) create_ignore_plane();
   }
 
   void create_box() {
@@ -294,10 +316,42 @@ class CalibrationApp {
     zone.max_height_m = 2;
     config_.zones.push_back(std::move(zone));
     selected_ = static_cast<int>(config_.zones.size() - 1);
+    selected_plane_ = -1;
     selected_vertex_ = 0;
     selected_top_ = false;
     remember(before);
     status_ = "BOUNDING BOX CREATED - CLICK A CORNER OR GIZMO AXIS";
+  }
+
+  void create_ignore_plane() {
+    const auto before = config_;
+    specter::IgnorePlaneConfig plane;
+    std::size_t suffix = config_.ignore_planes.size() + 1;
+    do {
+      plane.name = "ignore_plane_" + std::to_string(suffix++);
+    } while (std::any_of(config_.ignore_planes.begin(), config_.ignore_planes.end(),
+                         [&](const auto& item) { return item.name == plane.name; }));
+    const auto camera_point = specter::transform_point(config_.camera_to_room, {0, 0, 0});
+    Vec3 normal = normalized({camera_point.x - target_x_, camera_point.y - target_y_, 0});
+    if (length(normal) < 0.5) normal = {0, -1, 0};
+    const Vec3 horizontal = normalized(cross({0, 0, 1}, normal));
+    const Vec3 vertical{0, 0, 1};
+    const Vec3 center{target_x_, target_y_, std::max(0.75, target_z_)};
+    constexpr double half_width = 0.5, half_height = 0.75;
+    const std::array<Vec3, 4> corners{
+        center - horizontal * half_width - vertical * half_height,
+        center + horizontal * half_width - vertical * half_height,
+        center + horizontal * half_width + vertical * half_height,
+        center - horizontal * half_width + vertical * half_height};
+    for (std::size_t i = 0; i < 4; ++i)
+      plane.corners_m[i] = {corners[i].x, corners[i].y, corners[i].z};
+    config_.ignore_planes.push_back(std::move(plane));
+    selected_plane_ = static_cast<int>(config_.ignore_planes.size() - 1);
+    selected_plane_corner_ = -1;
+    selected_ = -1;
+    selected_vertex_ = -1;
+    remember_ignore_planes(before);
+    status_ = "IGNORE PLANE CREATED - MOVE CENTER OR RESIZE CORNERS";
   }
 
   void on_char(unsigned int codepoint) {
@@ -349,6 +403,16 @@ class CalibrationApp {
   }
 
   Vec3 selected_point() const {
+    if (selected_plane_ >= 0) {
+      const auto& plane = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+      if (selected_plane_corner_ >= 0) {
+        const auto& corner = plane.corners_m[static_cast<std::size_t>(selected_plane_corner_)];
+        return {corner.x, corner.y, corner.z};
+      }
+      Vec3 center{};
+      for (const auto& corner : plane.corners_m) center = center + Vec3{corner.x, corner.y, corner.z};
+      return center * 0.25;
+    }
     if (selected_ < 0 || selected_vertex_ < 0) return {};
     const auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
     const auto& point = zone.floor_polygon[static_cast<std::size_t>(selected_vertex_)];
@@ -376,7 +440,39 @@ class CalibrationApp {
     }
     if (zone_index < 0) return false;
     selected_ = zone_index; selected_vertex_ = vertex_index; selected_top_ = top;
+    selected_plane_ = -1; selected_plane_corner_ = -1;
     status_ = "CORNER SELECTED - DRAG A COLORED AXIS";
+    return true;
+  }
+
+  bool pick_ignore_plane(double x, double y) {
+    double best = 14.0;
+    int plane_index = -1, corner_index = -1;
+    for (std::size_t index = 0; index < config_.ignore_planes.size(); ++index) {
+      const auto& plane = config_.ignore_planes[index];
+      for (std::size_t corner = 0; corner < plane.corners_m.size(); ++corner) {
+        const auto& point = plane.corners_m[corner];
+        const auto screen = project({point.x, point.y, point.z});
+        if (!screen) continue;
+        const double candidate = std::hypot(screen->x - x, screen->y - y);
+        if (candidate < best) { best = candidate; plane_index = static_cast<int>(index); corner_index = static_cast<int>(corner); }
+      }
+      Vec3 center{};
+      for (const auto& point : plane.corners_m) center = center + Vec3{point.x, point.y, point.z};
+      center = center * 0.25;
+      const auto screen = project(center);
+      if (screen) {
+        const double candidate = std::hypot(screen->x - x, screen->y - y);
+        if (candidate < best) { best = candidate; plane_index = static_cast<int>(index); corner_index = -1; }
+      }
+    }
+    if (plane_index < 0) return false;
+    selected_plane_ = plane_index;
+    selected_plane_corner_ = corner_index;
+    selected_ = -1;
+    selected_vertex_ = -1;
+    status_ = corner_index >= 0 ? "IGNORE CORNER SELECTED - DRAG AXIS TO RESIZE" :
+                                  "IGNORE PLANE SELECTED - DRAG AXIS TO MOVE";
     return true;
   }
 
@@ -389,7 +485,7 @@ class CalibrationApp {
   }
 
   GizmoAxis pick_gizmo(double x, double y) const {
-    if (selected_ < 0 || selected_vertex_ < 0) return GizmoAxis::none;
+    if (selected_plane_ < 0 && (selected_ < 0 || selected_vertex_ < 0)) return GizmoAxis::none;
     const Vec3 origin = selected_point();
     const auto start = project(origin);
     if (!start) return GizmoAxis::none;
@@ -408,13 +504,49 @@ class CalibrationApp {
     return best_axis;
   }
 
+  void move_or_resize_ignore_plane(GizmoAxis axis, double metres) {
+    auto& plane = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+    Vec3 delta{};
+    if (axis == GizmoAxis::x) delta.x = metres;
+    if (axis == GizmoAxis::y) delta.y = metres;
+    if (axis == GizmoAxis::z) delta.z = metres;
+    if (selected_plane_corner_ < 0) {
+      for (auto& corner : plane.corners_m) {
+        corner.x += delta.x; corner.y += delta.y; corner.z += delta.z;
+      }
+      return;
+    }
+    const auto original = plane.corners_m;
+    const Vec3 u = normalized(Vec3{original[1].x - original[0].x, original[1].y - original[0].y,
+                                   original[1].z - original[0].z});
+    const Vec3 v = normalized(Vec3{original[3].x - original[0].x, original[3].y - original[0].y,
+                                   original[3].z - original[0].z});
+    const std::size_t selected = static_cast<std::size_t>(selected_plane_corner_);
+    const std::size_t opposite = (selected + 2) % 4;
+    const Vec3 selected_point{original[selected].x, original[selected].y, original[selected].z};
+    const Vec3 opposite_point{original[opposite].x, original[opposite].y, original[opposite].z};
+    const Vec3 candidate = selected_point + delta;
+    const Vec3 diagonal = candidate - opposite_point;
+    const double width = std::max(0.05, std::abs(dot(diagonal, u)));
+    const double height = std::max(0.05, std::abs(dot(diagonal, v)));
+    const Vec3 center = (candidate + opposite_point) * 0.5;
+    const std::array<Vec3, 4> rebuilt{
+        center - u * (width * 0.5) - v * (height * 0.5),
+        center + u * (width * 0.5) - v * (height * 0.5),
+        center + u * (width * 0.5) + v * (height * 0.5),
+        center - u * (width * 0.5) + v * (height * 0.5)};
+    for (std::size_t i = 0; i < 4; ++i)
+      plane.corners_m[i] = {rebuilt[i].x, rebuilt[i].y, rebuilt[i].z};
+  }
+
   void on_cursor(double x, double y) {
     const double dx = x - mouse_x_;
     const double dy = y - mouse_y_;
     mouse_x_ = x; mouse_y_ = y;
     int width, height;
     glfwGetWindowSize(window_, &width, &height);
-    if (gizmo_drag_ != GizmoAxis::none && selected_ >= 0 && selected_vertex_ >= 0) {
+    if (gizmo_drag_ != GizmoAxis::none &&
+        (selected_plane_ >= 0 || (selected_ >= 0 && selected_vertex_ >= 0))) {
       const Vec3 origin = selected_point();
       Vec3 delta{};
       if (gizmo_drag_ == GizmoAxis::x) delta.x = 0.45;
@@ -427,17 +559,21 @@ class CalibrationApp {
         const double pixels = std::hypot(axis_x, axis_y);
         if (pixels > 1) {
           const double metres = (dx * axis_x + dy * axis_y) / (pixels * pixels) * 0.45;
-          auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
-          auto& vertex = zone.floor_polygon[static_cast<std::size_t>(selected_vertex_)];
-          if (gizmo_drag_ == GizmoAxis::x) vertex.x += metres;
-          if (gizmo_drag_ == GizmoAxis::y) vertex.y += metres;
-          if (gizmo_drag_ == GizmoAxis::z) {
-            if (selected_top_) zone.max_height_m = std::max(zone.min_height_m + 0.05, zone.max_height_m + metres);
-            else zone.min_height_m = std::min(zone.max_height_m - 0.05, zone.min_height_m + metres);
+          if (selected_plane_ >= 0) {
+            move_or_resize_ignore_plane(gizmo_drag_, metres);
+          } else {
+            auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
+            auto& vertex = zone.floor_polygon[static_cast<std::size_t>(selected_vertex_)];
+            if (gizmo_drag_ == GizmoAxis::x) vertex.x += metres;
+            if (gizmo_drag_ == GizmoAxis::y) vertex.y += metres;
+            if (gizmo_drag_ == GizmoAxis::z) {
+              if (selected_top_) zone.max_height_m = std::max(zone.min_height_m + 0.05, zone.max_height_m + metres);
+              else zone.min_height_m = std::min(zone.max_height_m - 0.05, zone.min_height_m + metres);
+            }
           }
         }
       }
-      rebuild_pipeline();
+      if (selected_plane_ >= 0) refresh_ignore_planes(); else rebuild_pipeline();
       return;
     }
     if (right_down_) {
@@ -481,14 +617,18 @@ class CalibrationApp {
     if (button != GLFW_MOUSE_BUTTON_LEFT) return;
     left_down_ = action == GLFW_PRESS;
     if (action == GLFW_RELEASE) {
-      if (gizmo_drag_ != GizmoAxis::none || translating_) remember(edit_before_);
+      if (gizmo_drag_ != GizmoAxis::none || translating_) {
+        if (editing_plane_) remember_ignore_planes(edit_before_); else remember(edit_before_);
+      }
       gizmo_drag_ = GizmoAxis::none; translating_ = false; corner_click_ = false;
+      editing_plane_ = false;
       return;
     }
     const auto axis = pick_gizmo(mouse_x_, mouse_y_);
     if (axis != GizmoAxis::none) {
-      edit_before_ = config_; gizmo_drag_ = axis; return;
+      edit_before_ = config_; gizmo_drag_ = axis; editing_plane_ = selected_plane_ >= 0; return;
     }
+    if (pick_ignore_plane(mouse_x_, mouse_y_)) { corner_click_ = true; return; }
     if (pick_corner(mouse_x_, mouse_y_)) { corner_click_ = true; return; }
     if (!top_down_) return;
     const auto point = screen_to_floor(mouse_x_, mouse_y_);
@@ -523,6 +663,27 @@ class CalibrationApp {
     remember(before);
   }
 
+  void duplicate_ignore_plane() {
+    const auto before = config_;
+    auto copy = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+    const std::string base = copy.name + "_copy";
+    copy.name = base;
+    std::size_t suffix = 2;
+    while (std::any_of(config_.ignore_planes.begin(), config_.ignore_planes.end(),
+                       [&](const auto& item) { return item.name == copy.name; }))
+      copy.name = base + std::to_string(suffix++);
+    for (auto& point : copy.corners_m) point.x += 0.15;
+    config_.ignore_planes.push_back(std::move(copy));
+    selected_plane_ = static_cast<int>(config_.ignore_planes.size() - 1);
+    selected_plane_corner_ = -1;
+    remember_ignore_planes(before);
+  }
+
+  void duplicate_selected() {
+    if (selected_plane_ >= 0) duplicate_ignore_plane();
+    else if (selected_ >= 0) duplicate_zone();
+  }
+
   void delete_zone() {
     const auto before = config_;
     config_.zones.erase(config_.zones.begin() + selected_);
@@ -531,16 +692,53 @@ class CalibrationApp {
     remember(before);
   }
 
+  void delete_selected() {
+    if (selected_plane_ >= 0) {
+      const auto before = config_;
+      config_.ignore_planes.erase(config_.ignore_planes.begin() + selected_plane_);
+      selected_plane_ = config_.ignore_planes.empty() ? -1 :
+          std::min(selected_plane_, static_cast<int>(config_.ignore_planes.size() - 1));
+      selected_plane_corner_ = -1;
+      remember_ignore_planes(before);
+    } else if (selected_ >= 0) delete_zone();
+  }
+
   static bool inside(double x, double y, double left, double top, double width, double height) {
     return x >= left && x <= left + width && y >= top && y <= top + height;
   }
 
   void apply_rename() {
-    if (selected_ < 0 || rename_buffer_.empty()) return;
+    if ((selected_ < 0 && selected_plane_ < 0) || rename_buffer_.empty()) return;
     const auto before = config_;
-    config_.zones[static_cast<std::size_t>(selected_)].name = rename_buffer_;
+    if (selected_plane_ >= 0) config_.ignore_planes[static_cast<std::size_t>(selected_plane_)].name = rename_buffer_;
+    else config_.zones[static_cast<std::size_t>(selected_)].name = rename_buffer_;
     renaming_ = false;
-    remember(before);
+    if (selected_plane_ >= 0) remember_ignore_planes(before); else remember(before);
+  }
+
+  void rotate_selected_plane(Vec3 axis, double radians) {
+    if (selected_plane_ < 0) return;
+    const auto before = config_;
+    auto& plane = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+    axis = normalized(axis);
+    Vec3 center{};
+    for (const auto& point : plane.corners_m) center = center + Vec3{point.x, point.y, point.z};
+    center = center * 0.25;
+    const double cosine = std::cos(radians), sine = std::sin(radians);
+    for (auto& point : plane.corners_m) {
+      const Vec3 relative = Vec3{point.x, point.y, point.z} - center;
+      const Vec3 rotated = relative * cosine + cross(axis, relative) * sine + axis * dot(axis, relative) * (1 - cosine);
+      point = {center.x + rotated.x, center.y + rotated.y, center.z + rotated.z};
+    }
+    remember_ignore_planes(before);
+  }
+
+  void change_ignore_margin(double delta) {
+    if (selected_plane_ < 0) return;
+    const auto before = config_;
+    auto& margin = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)].margin_m;
+    margin = std::clamp(margin + delta, 0.0, 1.0);
+    remember_ignore_planes(before);
   }
 
   void confirm_save() {
@@ -578,14 +776,46 @@ class CalibrationApp {
     else if (inside(x, y, left, 164, 142, 30)) live_validation_ = !live_validation_;
     else if (inside(x, y, left + 152, 164, 68, 30)) undo();
     else if (inside(x, y, left + 226, 164, 68, 30)) redo();
-    else if (inside(x, y, left, 202, 68, 30) && !config_.zones.empty()) {
-      selected_ = (selected_ <= 0) ? static_cast<int>(config_.zones.size() - 1) : selected_ - 1; selected_vertex_ = -1;
-    } else if (inside(x, y, left + 74, 202, 68, 30) && !config_.zones.empty()) {
-      selected_ = (selected_ + 1) % static_cast<int>(config_.zones.size()); selected_vertex_ = -1;
-    } else if (inside(x, y, left + 152, 202, 68, 30) && selected_ >= 0) {
-      renaming_ = true; rename_buffer_ = config_.zones[static_cast<std::size_t>(selected_)].name;
-    } else if (inside(x, y, left + 226, 202, 68, 30) && selected_ >= 0) duplicate_zone();
-    else if (inside(x, y, left, 238, 294, 30) && selected_ >= 0) delete_zone();
+    else if (inside(x, y, left, 202, 68, 30)) {
+      if (selected_plane_ >= 0 && !config_.ignore_planes.empty()) {
+        selected_plane_ = selected_plane_ <= 0 ? static_cast<int>(config_.ignore_planes.size() - 1) : selected_plane_ - 1;
+        selected_plane_corner_ = -1;
+      } else if (!config_.zones.empty()) {
+        selected_ = (selected_ <= 0) ? static_cast<int>(config_.zones.size() - 1) : selected_ - 1; selected_vertex_ = -1;
+      }
+    } else if (inside(x, y, left + 74, 202, 68, 30)) {
+      if (selected_plane_ >= 0 && !config_.ignore_planes.empty()) {
+        selected_plane_ = (selected_plane_ + 1) % static_cast<int>(config_.ignore_planes.size());
+        selected_plane_corner_ = -1;
+      } else if (!config_.zones.empty()) {
+        selected_ = (selected_ + 1) % static_cast<int>(config_.zones.size()); selected_vertex_ = -1;
+      }
+    } else if (inside(x, y, left + 152, 202, 68, 30) && (selected_ >= 0 || selected_plane_ >= 0)) {
+      renaming_ = true;
+      rename_buffer_ = selected_plane_ >= 0 ? config_.ignore_planes[static_cast<std::size_t>(selected_plane_)].name :
+                                              config_.zones[static_cast<std::size_t>(selected_)].name;
+    } else if (inside(x, y, left + 226, 202, 68, 30) && (selected_ >= 0 || selected_plane_ >= 0)) duplicate_selected();
+    else if (inside(x, y, left, 238, 294, 30) && (selected_ >= 0 || selected_plane_ >= 0)) delete_selected();
+    else if (selected_plane_ >= 0 && inside(x, y, left, 388, 34, 26)) change_ignore_margin(-0.01);
+    else if (selected_plane_ >= 0 && inside(x, y, left + 260, 388, 34, 26)) change_ignore_margin(0.01);
+    else if (selected_plane_ >= 0 && inside(x, y, left, 426, 34, 26)) rotate_selected_plane({0, 0, 1}, -5 * pi / 180);
+    else if (selected_plane_ >= 0 && inside(x, y, left + 260, 426, 34, 26)) rotate_selected_plane({0, 0, 1}, 5 * pi / 180);
+    else if (selected_plane_ >= 0 && inside(x, y, left, 464, 34, 26)) {
+      const auto& p = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+      rotate_selected_plane(normalized(Vec3{p.corners_m[1].x - p.corners_m[0].x,
+                                            p.corners_m[1].y - p.corners_m[0].y,
+                                            p.corners_m[1].z - p.corners_m[0].z}), -5 * pi / 180);
+    } else if (selected_plane_ >= 0 && inside(x, y, left + 260, 464, 34, 26)) {
+      const auto& p = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+      rotate_selected_plane(normalized(Vec3{p.corners_m[1].x - p.corners_m[0].x,
+                                            p.corners_m[1].y - p.corners_m[0].y,
+                                            p.corners_m[1].z - p.corners_m[0].z}), 5 * pi / 180);
+    } else if (selected_plane_ >= 0 && inside(x, y, left, 502, 294, 26)) {
+      const auto before = config_;
+      auto& enabled = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)].enabled;
+      enabled = !enabled;
+      remember_ignore_planes(before);
+    }
     else if (inside(x, y, left, 388, 34, 26)) change_selected([](auto& z) { z.enter_points = std::max(z.exit_points, z.enter_points > 10 ? z.enter_points - 10 : z.exit_points); });
     else if (inside(x, y, left + 260, 388, 34, 26)) change_selected([](auto& z) { z.enter_points += 10; });
     else if (inside(x, y, left, 426, 34, 26)) change_selected([](auto& z) { z.exit_points = std::max<std::size_t>(1, z.exit_points > 10 ? z.exit_points - 10 : 1); });
@@ -720,10 +950,53 @@ class CalibrationApp {
       glPointSize(4.0F); glColor3f(1, 0.25F, 0.1F); glBegin(GL_POINTS);
       for (const auto& point : foreground_points_) glVertex3d(point.x, point.y, top_down_ ? 0.03 : point.z);
       glEnd();
+      glPointSize(3.0F); glColor3f(0.9F, 0.15F, 0.75F); glBegin(GL_POINTS);
+      for (const auto& point : ignored_points_) glVertex3d(point.x, point.y, top_down_ ? 0.04 : point.z);
+      glEnd();
     }
+    for (std::size_t i = 0; i < config_.ignore_planes.size(); ++i)
+      draw_ignore_plane(config_.ignore_planes[i], static_cast<int>(i) == selected_plane_);
     for (std::size_t i = 0; i < config_.zones.size(); ++i) draw_zone(config_.zones[i], static_cast<int>(i) == selected_);
     if (object_tracking_) draw_tracks();
     draw_gizmo();
+  }
+
+  void draw_ignore_plane(const specter::IgnorePlaneConfig& plane, bool selected) {
+    const float red = plane.enabled ? 1.0F : 0.45F;
+    const float green = selected ? 0.42F : 0.18F;
+    const float blue = plane.enabled ? 0.08F : 0.45F;
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(red, green, blue, plane.enabled ? 0.22F : 0.10F);
+    glBegin(GL_QUADS);
+    for (const auto& point : plane.corners_m) glVertex3d(point.x, point.y, point.z);
+    glEnd();
+    glColor4f(red, selected ? 0.75F : 0.4F, blue, 0.95F);
+    glLineWidth(selected ? 4.0F : 2.0F);
+    glBegin(GL_LINE_LOOP);
+    for (const auto& point : plane.corners_m) glVertex3d(point.x, point.y, point.z);
+    glEnd();
+    if (selected) {
+      glDisable(GL_DEPTH_TEST);
+      glPointSize(10.0F); glBegin(GL_POINTS);
+      for (const auto& point : plane.corners_m) glVertex3d(point.x, point.y, point.z);
+      glEnd();
+      Vec3 center{};
+      for (const auto& point : plane.corners_m) center = center + Vec3{point.x, point.y, point.z};
+      center = center * 0.25;
+      const Vec3 u{plane.corners_m[1].x - plane.corners_m[0].x,
+                   plane.corners_m[1].y - plane.corners_m[0].y,
+                   plane.corners_m[1].z - plane.corners_m[0].z};
+      const Vec3 v{plane.corners_m[3].x - plane.corners_m[0].x,
+                   plane.corners_m[3].y - plane.corners_m[0].y,
+                   plane.corners_m[3].z - plane.corners_m[0].z};
+      const Vec3 normal = normalized(cross(u, v));
+      glLineWidth(3.0F); glBegin(GL_LINES);
+      glVertex3d(center.x, center.y, center.z);
+      glVertex3d(center.x + normal.x * 0.35, center.y + normal.y * 0.35, center.z + normal.z * 0.35);
+      glEnd();
+      glEnable(GL_DEPTH_TEST);
+    }
+    glDisable(GL_BLEND);
   }
 
   void draw_tracks() {
@@ -800,7 +1073,7 @@ class CalibrationApp {
   }
 
   void draw_gizmo() {
-    if (selected_ < 0 || selected_vertex_ < 0) return;
+    if (selected_plane_ < 0 && (selected_ < 0 || selected_vertex_ < 0)) return;
     const auto origin = selected_point();
     glDisable(GL_DEPTH_TEST);
     glLineWidth(5.0F);
@@ -828,6 +1101,7 @@ class CalibrationApp {
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, width, height, 0, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     if (top_down_) draw_topdown_labels(width, height);
+    draw_ignore_plane_labels();
     if (object_tracking_) draw_track_labels();
     glColor4f(0.055F, 0.065F, 0.085F, 0.98F);
     glBegin(GL_QUADS); glVertex2d(width - panel_width, 0); glVertex2d(width, 0); glVertex2d(width, height); glVertex2d(width - panel_width, height); glEnd();
@@ -845,14 +1119,26 @@ class CalibrationApp {
     draw_button(x + 74, 202, 68, 30, "NEXT", false);
     draw_button(x + 152, 202, 68, 30, "RENAME", renaming_);
     draw_button(x + 226, 202, 68, 30, "COPY", false);
-    draw_button(x, 238, 294, 30, "DELETE SELECTED ZONE", false, true);
+    draw_button(x, 238, 294, 30, selected_plane_ >= 0 ? "DELETE SELECTED PLANE" : "DELETE SELECTED ZONE", false, true);
     if (renaming_) {
       glColor3f(1, 0.82F, 0.25F); draw_text(x, 280, "NAME: " + rename_buffer_ + "_", 1.4);
       draw_button(x, 316, 135, 30, "APPLY NAME", false);
       draw_button(x + 145, 316, 135, 30, "CANCEL", false);
     }
     double y = renaming_ ? 360 : 284;
-    if (selected_ >= 0 && selected_ < static_cast<int>(config_.zones.size())) {
+    if (selected_plane_ >= 0 && selected_plane_ < static_cast<int>(config_.ignore_planes.size())) {
+      const auto& plane = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+      glColor3f(1, 0.35F, 0.12F); draw_text(x, y, "IGNORE: " + plane.name, 1.5); y += 22;
+      glColor3f(0.78F, 0.82F, 0.86F);
+      draw_text(x, y, std::string("STATE: ") + (plane.enabled ? "ENABLED" : "DISABLED"), 1.2); y += 20;
+      if (static_cast<std::size_t>(selected_plane_) < ignore_plane_states_.size()) {
+        draw_text(x, y, "REJECTED: " + std::to_string(ignore_plane_states_[static_cast<std::size_t>(selected_plane_)].rejected_points) + " PTS", 1.2); y += 20;
+      }
+      draw_stepper(x, 388, "MARGIN", short_number(plane.margin_m) + " M");
+      draw_stepper(x, 426, "YAW", "5 DEG");
+      draw_stepper(x, 464, "PITCH", "5 DEG");
+      draw_button(x, 502, 294, 26, plane.enabled ? "DISABLE PLANE" : "ENABLE PLANE", plane.enabled);
+    } else if (selected_ >= 0 && selected_ < static_cast<int>(config_.zones.size())) {
       const auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
       glColor3f(1, 0.65F, 0.2F); draw_text(x, y, "ZONE: " + zone.name, 1.6); y += 22;
       glColor3f(0.78F, 0.82F, 0.86F);
@@ -875,7 +1161,7 @@ class CalibrationApp {
                 object_tracking_ ? "OBJECT TRACKING ON  " + std::to_string(track_states_.size())
                                  : "OBJECT TRACKING OFF",
                 object_tracking_);
-    draw_text(x, height - 128, "CTRL+N  NEW BOUNDING BOX", 1.35);
+    draw_text(x, height - 128, "CTRL+N BOX  CTRL+M IGNORE PLANE", 1.05);
     draw_text(x, height - 106, "CLICK CORNER, DRAG X/Y/Z", 1.25);
     draw_text(x, height - 86, "LEFT ORBIT  RIGHT PAN  WHEEL ZOOM", 1.05);
     draw_button(x, height - 52, 294, 34, "REVIEW AND SAVE", false);
@@ -916,6 +1202,20 @@ class CalibrationApp {
     }
   }
 
+  void draw_ignore_plane_labels() {
+    for (std::size_t index = 0; index < config_.ignore_planes.size(); ++index) {
+      const auto& plane = config_.ignore_planes[index];
+      Vec3 center{};
+      for (const auto& point : plane.corners_m) center = center + Vec3{point.x, point.y, point.z};
+      center = center * 0.25;
+      const auto screen = project(center);
+      if (!screen) continue;
+      glColor3f(static_cast<int>(index) == selected_plane_ ? 1.0F : 0.85F,
+                plane.enabled ? 0.35F : 0.55F, plane.enabled ? 0.1F : 0.55F);
+      draw_text(screen->x + 8, screen->y + 8, "IGNORE " + plane.name, 1.15);
+    }
+  }
+
   void draw_track_labels() {
     for (const auto& track : track_states_) {
       const auto screen = project({track.centroid_m.x, track.centroid_m.y,
@@ -942,9 +1242,11 @@ class CalibrationApp {
     glColor3f(0.8F, 0.85F, 0.9F);
     draw_text(125, 175, "FILE: " + options_.config.string(), 1.5);
     draw_text(125, 205, "ZONES: " + std::to_string(original_.zones.size()) + " -> " + std::to_string(config_.zones.size()), 1.5);
-    draw_text(125, 235, original_.camera_to_room.matrix == config_.camera_to_room.matrix
+    draw_text(125, 235, "IGNORE PLANES: " + std::to_string(original_.ignore_planes.size()) + " -> " +
+        std::to_string(config_.ignore_planes.size()), 1.5);
+    draw_text(125, 265, original_.camera_to_room.matrix == config_.camera_to_room.matrix
         ? "ROOM TRANSFORM: UNCHANGED" : "ROOM TRANSFORM: CHANGED", 1.5);
-    draw_text(125, 265, specter::serialize_config(original_) == specter::serialize_config(config_)
+    draw_text(125, 295, specter::serialize_config(original_) == specter::serialize_config(config_)
         ? "CONTENT: NO CHANGES" : "CONTENT: MODIFIED", 1.5);
     draw_button(125, height - 175, 360, 35, "ATOMICALLY REPLACE CONFIG", true);
     draw_button(510, height - 175, 180, 35, "CANCEL", false, true);
@@ -962,6 +1264,8 @@ class CalibrationApp {
   std::vector<specter::Point3> foreground_points_;
   std::vector<specter::ZoneState> zone_states_;
   std::vector<specter::TrackState> track_states_;
+  std::vector<specter::IgnorePlaneState> ignore_plane_states_;
+  std::vector<specter::Point3> ignored_points_;
   std::vector<specter::AppConfig> undo_, redo_;
   specter::AppConfig edit_before_;
   std::string status_{"STARTING"};
@@ -969,7 +1273,9 @@ class CalibrationApp {
   bool frozen_{}, top_down_{}, left_down_{}, right_down_{}, translating_{}, corner_click_{}, renaming_{}, save_preview_{};
   bool live_validation_{};
   bool object_tracking_{};
+  bool editing_plane_{};
   int selected_{-1}, selected_vertex_{-1};
+  int selected_plane_{-1}, selected_plane_corner_{-1};
   bool selected_top_{};
   GizmoAxis gizmo_drag_{GizmoAxis::none};
   double mouse_x_{}, mouse_y_{};

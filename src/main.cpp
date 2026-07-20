@@ -158,6 +158,7 @@ int main(int argc, char** argv) {
       if (frame) {
         snapshot.zones = pipeline.process(*frame);
         snapshot.tracks = pipeline.last_tracks();
+        snapshot.ignore_planes = pipeline.last_ignore_plane_states();
         snapshot.last_valid_frame_at = frame->observed_at;
         snapshot.sensor = {true, false, "streaming"};
         missed = 0;
@@ -169,6 +170,7 @@ int main(int argc, char** argv) {
           source.reset();
           pipeline.reset_tracking();
           snapshot.tracks.clear();
+          snapshot.ignore_planes.clear();
         }
       }
       publish_outputs();
@@ -177,6 +179,7 @@ int main(int argc, char** argv) {
     snapshot.sensor = {false, false, "stopped"};
     pipeline.reset_tracking();
     snapshot.tracks.clear();
+    snapshot.ignore_planes.clear();
     publish_outputs(true);
     std::cerr << "{\"event\":\"stopped\",\"frames\":" << completed << "}\n";
     return 0;

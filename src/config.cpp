@@ -47,6 +47,27 @@ bool proper_intersection(Point2 a, Point2 b, Point2 c, Point2 d) {
          ((cd_a > 0 && cd_b < 0) || (cd_a < 0 && cd_b > 0));
 }
 
+Point3 point3(const boost::json::value& value) {
+  const auto& object = value.as_object();
+  return {number(object, "x"), number(object, "y"), number(object, "z")};
+}
+
+Point3 subtract(Point3 left, Point3 right) {
+  return {left.x - right.x, left.y - right.y, left.z - right.z};
+}
+
+double dot(Point3 left, Point3 right) {
+  return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+Point3 cross(Point3 left, Point3 right) {
+  return {left.y * right.z - left.z * right.y,
+          left.z * right.x - left.x * right.z,
+          left.x * right.y - left.y * right.x};
+}
+
+double length(Point3 value) { return std::sqrt(dot(value, value)); }
+
 }  // namespace
 
 AppConfig load_config(const std::filesystem::path& path) {
@@ -81,6 +102,22 @@ AppConfig load_config(const std::filesystem::path& path) {
     config.tracking.association_max_distance_m = number(tracking, "association_max_distance_m");
     config.tracking.confirmation_frames = size_value(tracking, "confirmation_frames");
     config.tracking.max_missed_frames = size_value(tracking, "max_missed_frames");
+  }
+
+  if (const auto* value = root.if_contains("ignore_planes")) {
+    for (const auto& plane_value : value->as_array()) {
+      const auto& object = plane_value.as_object();
+      IgnorePlaneConfig plane;
+      plane.name = object.at("name").as_string().c_str();
+      plane.enabled = bool_value(object, "enabled");
+      plane.margin_m = number(object, "margin_m");
+      plane.surface_tolerance_m = object.if_contains("surface_tolerance_m")
+          ? number(object, "surface_tolerance_m") : 0.03;
+      const auto& corners = object.at("corners_m").as_array();
+      if (corners.size() != 4) throw std::runtime_error("ignore plane " + plane.name + " must contain 4 corners");
+      for (std::size_t i = 0; i < 4; ++i) plane.corners_m[i] = point3(corners[i]);
+      config.ignore_planes.push_back(std::move(plane));
+    }
   }
 
   for (const auto& zone_value : root.at("zones").as_array()) {
@@ -132,6 +169,41 @@ void validate_config(const AppConfig& config) {
     throw std::runtime_error("tracking confirmation_frames must be positive");
   if (tracking.max_missed_frames == 0)
     throw std::runtime_error("tracking max_missed_frames must be positive");
+  std::set<std::string> plane_names;
+  for (const auto& plane : config.ignore_planes) {
+    if (plane.name.empty()) throw std::runtime_error("ignore plane name cannot be empty");
+    if (!plane_names.insert(plane.name).second) throw std::runtime_error("duplicate ignore plane name: " + plane.name);
+    if (!(plane.margin_m >= 0 && plane.margin_m <= 1.0) || !std::isfinite(plane.margin_m))
+      throw std::runtime_error("ignore plane " + plane.name + " margin_m must be between 0 and 1");
+    if (!(plane.surface_tolerance_m >= 0 && plane.surface_tolerance_m <= 0.2) ||
+        !std::isfinite(plane.surface_tolerance_m))
+      throw std::runtime_error("ignore plane " + plane.name + " surface_tolerance_m must be between 0 and 0.2");
+    for (const auto& corner : plane.corners_m)
+      if (!std::isfinite(corner.x) || !std::isfinite(corner.y) || !std::isfinite(corner.z) ||
+          std::abs(corner.x) > 50 || std::abs(corner.y) > 50 || std::abs(corner.z) > 20)
+        throw std::runtime_error("ignore plane " + plane.name + " has invalid or unreasonable corners");
+    const Point3 u = subtract(plane.corners_m[1], plane.corners_m[0]);
+    const Point3 v = subtract(plane.corners_m[3], plane.corners_m[0]);
+    const double width = length(u), height = length(v);
+    if (width < 0.05 || height < 0.05 || length(cross(u, v)) < 0.0025)
+      throw std::runtime_error("ignore plane " + plane.name + " has degenerate area");
+    if (std::abs(dot(u, v) / (width * height)) > 0.02)
+      throw std::runtime_error("ignore plane " + plane.name + " adjacent edges must be perpendicular");
+    const Point3 expected = {plane.corners_m[1].x + plane.corners_m[3].x - plane.corners_m[0].x,
+                             plane.corners_m[1].y + plane.corners_m[3].y - plane.corners_m[0].y,
+                             plane.corners_m[1].z + plane.corners_m[3].z - plane.corners_m[0].z};
+    if (length(subtract(expected, plane.corners_m[2])) > 0.01)
+      throw std::runtime_error("ignore plane " + plane.name + " corners must form an ordered rectangle");
+    const Point3 camera_origin{config.camera_to_room.matrix[3], config.camera_to_room.matrix[7],
+                               config.camera_to_room.matrix[11]};
+    const Point3 from_corner = subtract(camera_origin, plane.corners_m[0]);
+    const Point3 normal = cross(u, v);
+    const double plane_distance = std::abs(dot(normal, from_corner)) / length(normal);
+    const double along_u = dot(from_corner, u) / dot(u, u);
+    const double along_v = dot(from_corner, v) / dot(v, v);
+    if (plane_distance < 0.01 && along_u >= 0 && along_u <= 1 && along_v >= 0 && along_v <= 1)
+      throw std::runtime_error("ignore plane " + plane.name + " intersects the calibrated camera origin");
+  }
   if (config.zones.empty()) throw std::runtime_error("at least one zone is required");
   std::set<std::string> names;
   for (const auto& zone : config.zones) {
@@ -182,6 +254,18 @@ std::string serialize_config(const AppConfig& config) {
       {"association_max_distance_m", config.tracking.association_max_distance_m},
       {"confirmation_frames", config.tracking.confirmation_frames},
       {"max_missed_frames", config.tracking.max_missed_frames}};
+  boost::json::array ignore_planes;
+  for (const auto& plane : config.ignore_planes) {
+    boost::json::array corners;
+    for (const auto& corner : plane.corners_m)
+      corners.push_back({{"x", corner.x}, {"y", corner.y}, {"z", corner.z}});
+    ignore_planes.push_back({
+        {"name", plane.name},
+        {"enabled", plane.enabled},
+        {"corners_m", std::move(corners)},
+        {"margin_m", plane.margin_m},
+        {"surface_tolerance_m", plane.surface_tolerance_m}});
+  }
   boost::json::array zones;
   for (const auto& zone : config.zones) {
     boost::json::array polygon;
@@ -200,6 +284,7 @@ std::string serialize_config(const AppConfig& config) {
       {"camera_to_room", std::move(transform)},
       {"processing", std::move(processing)},
       {"tracking", std::move(tracking)},
+      {"ignore_planes", std::move(ignore_planes)},
       {"zones", std::move(zones)}}) + "\n";
 }
 

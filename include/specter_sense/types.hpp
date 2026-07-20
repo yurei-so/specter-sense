@@ -72,10 +72,19 @@ struct TrackingConfig {
   std::size_t max_missed_frames{20};
 };
 
+struct IgnorePlaneConfig {
+  std::string name;
+  bool enabled{true};
+  std::array<Point3, 4> corners_m;
+  double margin_m{0.05};
+  double surface_tolerance_m{0.03};
+};
+
 struct AppConfig {
   Transform camera_to_room;
   ProcessingConfig processing;
   TrackingConfig tracking;
+  std::vector<IgnorePlaneConfig> ignore_planes;
   std::vector<ZoneConfig> zones;
 };
 
@@ -112,12 +121,19 @@ struct TrackState {
   std::chrono::system_clock::time_point observed_at;
 };
 
+struct IgnorePlaneState {
+  std::string name;
+  bool enabled{};
+  std::size_t rejected_points{};
+};
+
 struct Snapshot {
   std::chrono::system_clock::time_point generated_at;
   std::optional<std::chrono::system_clock::time_point> last_valid_frame_at;
   SensorState sensor;
   std::vector<ZoneState> zones;
   std::vector<TrackState> tracks;
+  std::vector<IgnorePlaneState> ignore_planes;
 };
 
 }  // namespace specter

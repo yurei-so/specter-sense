@@ -81,6 +81,10 @@ boost::json::value snapshot_to_json(const Snapshot& snapshot) {
         {"age_ms", age}};
   }
   root["tracks"] = std::move(tracks);
+  boost::json::object ignore_planes;
+  for (const auto& plane : snapshot.ignore_planes)
+    ignore_planes[plane.name] = {{"enabled", plane.enabled}, {"rejected_points", plane.rejected_points}};
+  root["ignore_planes"] = std::move(ignore_planes);
   return root;
 }
 

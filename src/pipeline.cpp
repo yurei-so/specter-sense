@@ -40,6 +40,20 @@ double distance(Point3 a, Point3 b) {
                    (a.z - b.z) * (a.z - b.z));
 }
 
+Point3 subtract(Point3 left, Point3 right) {
+  return {left.x - right.x, left.y - right.y, left.z - right.z};
+}
+
+double dot(Point3 left, Point3 right) {
+  return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+Point3 cross(Point3 left, Point3 right) {
+  return {left.y * right.z - left.z * right.y,
+          left.z * right.x - left.x * right.z,
+          left.x * right.y - left.y * right.x};
+}
+
 std::pair<std::string, double> classify(const Point3& bounds) {
   const double footprint = std::max(bounds.x, bounds.y);
   if (bounds.z >= 1.05 && bounds.z <= 2.35 && footprint >= 0.20 && footprint <= 1.25) {
@@ -176,10 +190,53 @@ bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon) {
   return inside;
 }
 
+std::optional<double> ray_ignore_plane_intersection(
+    const IgnorePlaneConfig& plane, const Point3& origin, const Point3& direction) {
+  if (!plane.enabled) return std::nullopt;
+  const Point3 u = subtract(plane.corners_m[1], plane.corners_m[0]);
+  const Point3 v = subtract(plane.corners_m[3], plane.corners_m[0]);
+  const Point3 normal = cross(u, v);
+  const double denominator = dot(normal, direction);
+  if (std::abs(denominator) < 1e-9) return std::nullopt;
+  const double parameter = dot(normal, subtract(plane.corners_m[0], origin)) / denominator;
+  if (!(parameter > 0) || !std::isfinite(parameter)) return std::nullopt;
+  const Point3 intersection{origin.x + direction.x * parameter,
+                            origin.y + direction.y * parameter,
+                            origin.z + direction.z * parameter};
+  const Point3 relative = subtract(intersection, plane.corners_m[0]);
+  const double u_squared = dot(u, u), v_squared = dot(v, v);
+  if (!(u_squared > 0 && v_squared > 0)) return std::nullopt;
+  const double along_u = dot(relative, u) / u_squared;
+  const double along_v = dot(relative, v) / v_squared;
+  const double margin_u = plane.margin_m / std::sqrt(u_squared);
+  const double margin_v = plane.margin_m / std::sqrt(v_squared);
+  if (along_u < -margin_u || along_u > 1.0 + margin_u ||
+      along_v < -margin_v || along_v > 1.0 + margin_v) return std::nullopt;
+  return parameter;
+}
+
 OccupancyPipeline::OccupancyPipeline(AppConfig config, bool retain_foreground_points)
     : config_(std::move(config)), runtime_(config_.zones.size()),
       retain_foreground_points_(retain_foreground_points), tracking_enabled_(config_.tracking.enabled) {
   validate_config(config_);
+}
+
+void OccupancyPipeline::rebuild_ignore_rays(const DepthFrame& frame) {
+  ignore_rays_.assign(frame.depth_mm.size(), {});
+  ignore_intrinsics_ = frame.intrinsics;
+  const Point3 origin = transform_point(config_.camera_to_room, {0, 0, 0});
+  for (std::size_t index = 0; index < frame.depth_mm.size(); ++index) {
+    const double u = static_cast<double>(index % frame.width);
+    const double v = static_cast<double>(index / frame.width);
+    const Point3 camera = deproject_depth(frame.intrinsics, u, v, 1.0);
+    const Point3 room = transform_point(config_.camera_to_room, camera);
+    const Point3 direction = subtract(room, origin);
+    for (std::size_t plane_index = 0; plane_index < config_.ignore_planes.size(); ++plane_index) {
+      const auto hit = ray_ignore_plane_intersection(config_.ignore_planes[plane_index], origin, direction);
+      if (hit && *hit < ignore_rays_[index].depth_m)
+        ignore_rays_[index] = {*hit, plane_index};
+    }
+  }
 }
 
 std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
@@ -194,6 +251,10 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
   } else if (frame.width != width_ || frame.height != height_) {
     throw std::runtime_error("depth frame dimensions changed");
   }
+  if (ignore_rays_.size() != frame.depth_mm.size() ||
+      ignore_intrinsics_.fx != frame.intrinsics.fx || ignore_intrinsics_.fy != frame.intrinsics.fy ||
+      ignore_intrinsics_.cx != frame.intrinsics.cx || ignore_intrinsics_.cy != frame.intrinsics.cy)
+    rebuild_ignore_rays(frame);
 
   struct Evidence {
     std::size_t count{};
@@ -203,11 +264,27 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
   };
   std::vector<Evidence> evidence(config_.zones.size());
   last_foreground_points_.clear();
+  last_ignored_points_.clear();
+  last_ignore_plane_states_.clear();
+  for (const auto& plane : config_.ignore_planes)
+    last_ignore_plane_states_.push_back({plane.name, plane.enabled, 0});
   const auto& p = config_.processing;
 
   for (std::size_t index = 0; index < frame.depth_mm.size(); ++index) {
     const double depth_m = static_cast<double>(frame.depth_mm[index]) / 1000.0;
     if (!std::isfinite(depth_m) || depth_m < p.min_depth_m || depth_m > p.max_depth_m) continue;
+    const auto& ignore = ignore_rays_[index];
+    if (ignore.plane_index < config_.ignore_planes.size() &&
+        depth_m >= ignore.depth_m - config_.ignore_planes[ignore.plane_index].surface_tolerance_m) {
+      ++last_ignore_plane_states_[ignore.plane_index].rejected_points;
+      if (retain_foreground_points_) {
+        const double u = static_cast<double>(index % frame.width);
+        const double v = static_cast<double>(index / frame.width);
+        last_ignored_points_.push_back(transform_point(
+            config_.camera_to_room, deproject_depth(frame.intrinsics, u, v, depth_m)));
+      }
+      continue;
+    }
     auto& background = background_m_[index];
     if (!std::isfinite(background)) {
       background = static_cast<float>(depth_m);
@@ -383,6 +460,17 @@ void OccupancyPipeline::reset_tracking() {
 void OccupancyPipeline::set_tracking_enabled(bool enabled) {
   if (tracking_enabled_ == enabled) return;
   tracking_enabled_ = enabled;
+  reset_tracking();
+}
+
+void OccupancyPipeline::set_ignore_planes(std::vector<IgnorePlaneConfig> planes) {
+  auto candidate = config_;
+  candidate.ignore_planes = std::move(planes);
+  validate_config(candidate);
+  config_.ignore_planes = std::move(candidate.ignore_planes);
+  ignore_rays_.clear();
+  last_ignore_plane_states_.clear();
+  last_ignored_points_.clear();
   reset_tracking();
 }
 

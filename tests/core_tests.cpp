@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -59,6 +60,12 @@ specter::DepthFrame tracking_frame(bool objects, int horizontal_offset = 0) {
   return result;
 }
 
+specter::IgnorePlaneConfig test_ignore_plane() {
+  return {"mirror", true,
+          {{{-0.3, 2.0, 0.0}, {0.3, 2.0, 0.0}, {0.3, 2.0, 2.0}, {-0.3, 2.0, 2.0}}},
+          0.05, 0.03};
+}
+
 specter::DepthFrame frame(float depth) {
   return {1, 1, {depth}, {1, 1, 0, 0}, std::chrono::system_clock::now()};
 }
@@ -74,6 +81,18 @@ void geometry_test() {
   const auto left = specter::deproject_depth({100, 100, 50, 40}, 25, 40, 2);
   const auto right = specter::deproject_depth({100, 100, 50, 40}, 75, 40, 2);
   require(left.x < 0 && right.x > 0, "depth deprojection changed camera-space handedness");
+
+  const auto plane = test_ignore_plane();
+  const auto hit = specter::ray_ignore_plane_intersection(plane, {0, 0, 1}, {0, 1, 0});
+  require(hit && std::abs(*hit - 2.0) < 0.0001, "bounded ray did not hit ignore plane");
+  require(!specter::ray_ignore_plane_intersection(plane, {0, 0, 1}, {1, 0, 0}),
+          "parallel ray hit ignore plane");
+  require(!specter::ray_ignore_plane_intersection(plane, {0, 0, 1}, {0.2, 1, 0}),
+          "ray outside bounded plane was accepted");
+  auto margin_plane = plane;
+  margin_plane.margin_m = 0.15;
+  require(specter::ray_ignore_plane_intersection(margin_plane, {0, 0, 1}, {0.2, 1, 0}).has_value(),
+          "ignore plane margin did not expand ray bounds");
 }
 
 void pipeline_test() {
@@ -133,6 +152,49 @@ void tracking_test() {
   require(pipeline.last_tracks().empty(), "tracking reset retained published tracks");
 }
 
+void ignore_plane_pipeline_test() {
+  auto config = test_config();
+  config.tracking.enabled = true;
+  config.tracking.min_cluster_points = 1;
+  config.tracking.confirmation_frames = 1;
+  config.camera_to_room.matrix = {1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1, 0, 0, 0, 1};
+  config.zones[0].floor_polygon = {{-3, 0}, {3, 0}, {3, 5}, {-3, 5}};
+  config.zones[0].max_height_m = 3;
+  config.ignore_planes = {test_ignore_plane()};
+  specter::OccupancyPipeline pipeline(config, true);
+  auto scene = [] (float depth) {
+    return specter::DepthFrame{5, 5, std::vector<float>(25, depth), {4, 4, 2, 2},
+                               std::chrono::system_clock::now()};
+  };
+  pipeline.process(scene(4000));
+  pipeline.process(scene(4000));
+  const auto baseline_rejected = pipeline.last_ignore_plane_states()[0].rejected_points;
+  auto before_plane = scene(4000);
+  before_plane.depth_mm[2 * 5 + 2] = 1500;
+  pipeline.process(before_plane);
+  require(pipeline.last_ignore_plane_states()[0].rejected_points + 1 == baseline_rejected,
+          "depth return before ignore plane was rejected");
+  auto on_surface_tolerance = scene(4000);
+  on_surface_tolerance.depth_mm[2 * 5 + 2] = 1975;
+  pipeline.process(on_surface_tolerance);
+  require(pipeline.last_ignore_plane_states()[0].rejected_points == baseline_rejected,
+          "surface tolerance did not reject a near-plane sample");
+  auto reflected = scene(4000);
+  reflected.depth_mm[2 * 5 + 2] = 3000;
+  reflected.depth_mm[2 * 5 + 4] = 3000;
+  const auto states = pipeline.process(reflected);
+  require(states[0].foreground_points == 1, "behind-plane reflection reached occupancy evidence");
+  require(pipeline.last_tracks().size() == 1, "legitimate point outside ignore plane did not reach tracking");
+  require(pipeline.last_ignore_plane_states().size() == 1 &&
+          pipeline.last_ignore_plane_states()[0].rejected_points > 0,
+          "ignore plane diagnostics omitted rejected samples");
+  require(!pipeline.last_ignored_points().empty(), "calibration diagnostics omitted ignored room points");
+
+  pipeline.set_ignore_planes({});
+  pipeline.process(reflected);
+  require(pipeline.last_ignore_plane_states().empty(), "removed ignore plane retained diagnostics");
+}
+
 void validation_test() {
   auto config = test_config();
   config.zones.push_back(config.zones.front());
@@ -153,10 +215,35 @@ void validation_test() {
     rejected = true;
   }
   require(rejected, "self-intersecting polygon was accepted");
+
+  config = test_config();
+  auto invalid_plane = test_ignore_plane();
+  invalid_plane.corners_m[2].y += 0.1;
+  config.ignore_planes = {invalid_plane};
+  rejected = false;
+  try {
+    specter::validate_config(config);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  require(rejected, "non-planar ignore rectangle was accepted");
+
+  config = test_config();
+  auto camera_plane = test_ignore_plane();
+  for (auto& corner : camera_plane.corners_m) corner.y = 0;
+  config.ignore_planes = {camera_plane};
+  rejected = false;
+  try {
+    specter::validate_config(config);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  require(rejected, "ignore plane intersecting the camera origin was accepted");
 }
 
 void config_round_trip_test() {
-  const auto config = test_config();
+  auto config = test_config();
+  config.ignore_planes = {test_ignore_plane()};
   const auto text = specter::serialize_config(config);
   const auto json = boost::json::parse(text).as_object();
   require(json.at("camera_to_room").as_array().size() == 16, "serialized transform size mismatch");
@@ -164,12 +251,24 @@ void config_round_trip_test() {
           "serialized zone mismatch");
   require(json.at("tracking").as_object().at("enabled").as_bool() == config.tracking.enabled,
           "serialized tracking config mismatch");
+  require(json.at("ignore_planes").as_array().size() == 1, "serialized ignore plane mismatch");
   const auto path = std::filesystem::temp_directory_path() /
       ("specter-sense-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
   specter::save_config_atomic(path, config);
   const auto loaded = specter::load_config(path);
   std::filesystem::remove(path);
-  require(loaded.zones.size() == 1 && loaded.zones.front().name == "room", "atomic config round-trip failed");
+  require(loaded.zones.size() == 1 && loaded.zones.front().name == "room" && loaded.ignore_planes.size() == 1,
+          "atomic config round-trip failed");
+
+  auto legacy = json;
+  legacy.erase("ignore_planes");
+  {
+    std::ofstream output(path);
+    output << boost::json::serialize(legacy);
+  }
+  const auto legacy_loaded = specter::load_config(path);
+  std::filesystem::remove(path);
+  require(legacy_loaded.ignore_planes.empty(), "legacy config without ignore_planes was not accepted");
 }
 
 std::string receive_message(int fd) {
@@ -245,12 +344,15 @@ void json_test() {
   snapshot.tracks = {{"track-7", "confirmed", "likely_human", 0.8, "standing", 0.7,
                       {1, 2, 0.9}, {0.1, 0, 0}, {0.5, 0.4, 1.7}, 500, {"desk"}, false,
                       snapshot.generated_at}};
+  snapshot.ignore_planes = {{"mirror", true, 321}};
   const auto json = specter::snapshot_to_json(snapshot).as_object();
   require(json.at("schema_version").as_int64() == 1, "schema version mismatch");
   require(json.at("zones").as_object().at("desk").as_object().at("occupied").as_bool(), "zone JSON mismatch");
   const auto& track = json.at("tracks").as_object().at("track-7").as_object();
   require(track.at("posture").as_string() == "standing", "track JSON mismatch");
   require(track.at("bounds_m").as_object().at("height").as_double() == 1.7, "track bounds JSON mismatch");
+  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("rejected_points").to_number<std::size_t>() == 321,
+          "ignore plane diagnostics JSON mismatch");
 }
 
 }  // namespace
@@ -260,6 +362,7 @@ int main() {
     geometry_test();
     pipeline_test();
     tracking_test();
+    ignore_plane_pipeline_test();
     validation_test();
     config_round_trip_test();
     socket_publisher_test();

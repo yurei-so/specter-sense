@@ -102,6 +102,8 @@ Use `--source synthetic` to learn the editor without the camera. The utility nev
 
 Object tracking visualization is optional and off by default in the calibrator. Click **Object Tracking Off** in the side panel to enable it, or start with `--object-tracking`. The overlay uses the same runtime clustering, classification, association, and posture pipeline: confirmed tracks appear as colored room-space bounds labeled with their ephemeral ID, class, and posture; coasting tracks remain visible with thinner bounds. Toggling the overlay clears its ephemeral tracks but preserves the learned foreground background, so tracking can restart without another warmup period. This display-only toggle does not change the saved `tracking.enabled` configuration value.
 
+Bounded ignore planes mark reflective room surfaces whose depth rays are untrustworthy. Press `Ctrl+M` to create a one-metre-wide, 1.5-metre-tall plane at the current view target, initially vertical and facing the calibrated camera. Ignore planes are edited like zones but remain rigid rectangles: click the center and drag an X/Y/Z gizmo to move the plane, or click a corner and drag to resize it within its current plane. The panel provides rename, copy, delete, enable/disable, margin, and five-degree yaw/pitch controls. Planes render as translucent warning surfaces with an outline, corner handles, normal indicator, label, and live rejected-point count. With validation enabled, rejected returns appear magenta and disappear from foreground evidence and anonymous tracks before saving.
+
 Suggested bedroom-mapping workflow:
 
 1. Aim the Kinect so a useful patch of floor and the relevant occupied volumes are visible.
@@ -119,6 +121,7 @@ Viewport and editing controls:
 - Drag inside a selected top-down polygon: translate the entire zone
 - Right-drag: pan; mouse wheel: zoom
 - `Ctrl+N`: create a new bounding box
+- `Ctrl+M`: create a new bounded ignore plane facing the calibrated camera
 - **Object Tracking On/Off**: toggle anonymous track bounds and labels without changing saved configuration
 - Every other editor action is a clickable panel control
 
@@ -145,6 +148,16 @@ The optional top-level `tracking` object controls anonymous object tracking:
 - `max_missed_frames`: bounded disappearance window before a track expires.
 
 When `tracking` is absent, the documented defaults are used. Classification and posture confidence values express strength of geometric evidence, not calibrated probabilities. `unknown` is an expected result for partial views, merged objects, ambiguous sitting/crouching geometry, and shapes outside the conservative rules.
+
+The optional top-level `ignore_planes` array contains rigid bounded rectangles in room coordinates:
+
+- `name`: stable unique plane name, such as `wardrobe_mirror`.
+- `enabled`: whether the plane participates in depth rejection.
+- `corners_m`: four ordered `{x,y,z}` corners forming a nondegenerate rectangle.
+- `margin_m`: bounded expansion beyond each edge, from 0 to 1 metre.
+- `surface_tolerance_m`: distance before the mathematical surface also treated as untrustworthy, from 0 to 0.2 metre.
+
+For each frame geometry, the service precomputes the nearest enabled plane intersection for every camera pixel. A valid depth return is rejected before background learning when its camera ray intersects the bounded plane and the return lies on or behind that surface. Rejected values never contribute to background adaptation, occupancy, foreground point clouds, clustering, tracking, classification, or posture. Changing ignore-plane geometry invalidates the ray lookup without discarding the learned image-space background. Existing configurations without `ignore_planes` remain valid and behave as an empty list.
 
 Thresholds are sensor-resolution and scene dependent. Tune them from observations in the real room rather than treating the example values as universal.
 
@@ -175,6 +188,8 @@ The service then emits complete state envelopes with a reason:
 Occupancy and health transitions publish immediately. Observation messages default to 10 Hz so consumers receive current evidence, centroid, and range data without tying updates to disk writes. `sequence` increases monotonically for the lifetime of the process. Clients should reconnect after EOF and treat the next `snapshot` as authoritative.
 
 `tracks` is an additive schema-v1 field keyed by an ephemeral ID such as `track-3`. Each item reports `tracking_state` (`confirmed` or `coasting`), conservative classification and posture labels with confidence, room-space centroid/velocity/bounds, foreground evidence, intersected zone names, occlusion state, and freshness. IDs are meaningful only during the current uninterrupted sensor session and must never be treated as a person identity. Existing v1 consumers may ignore this field.
+
+The additive `ignore_planes` state object reports each configured plane's enabled state and the number of samples rejected in the latest valid frame. It contains derived counters only—never image or depth-frame data.
 
 Inspect the stream from a terminal:
 
@@ -274,4 +289,4 @@ The service does not write state to disk by default. Pass `--output PATH` when a
 
 ## Privacy and debug policy
 
-The product is derived occupancy and anonymous tracking state. No code path currently writes RGB, IR, or depth frames. Track state contains geometry and motion only, and process-local IDs are cleared on sensor reset. Any future frame capture, replay recording, biometric classification, or cross-session identity feature must be explicit, visibly enabled, and separately reviewed.
+The product is derived occupancy, anonymous tracking, and non-image ignore-plane diagnostic state. No code path currently writes RGB, IR, or depth frames. Track state contains geometry and motion only, and process-local IDs are cleared on sensor reset. Ignore planes reject untrusted rays; they never reconstruct, correct, or persist reflected depth geometry. Any future frame capture, replay recording, biometric classification, or cross-session identity feature must be explicit, visibly enabled, and separately reviewed.
