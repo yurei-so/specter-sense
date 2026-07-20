@@ -1,0 +1,146 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: Configure",
+      "type": "process",
+      "command": "cmake",
+      "args": [
+        "-S",
+        "${workspaceFolder}",
+        "-B",
+        "${workspaceFolder}/build",
+        "-DFREENECT2_ROOT=/home/alu52/libfreenect2",
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: Build",
+      "type": "process",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--parallel"
+      ],
+      "dependsOn": "CMake: Configure",
+      "dependsOrder": "sequence",
+      "problemMatcher": "$gcc",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "CTest: Run",
+      "type": "process",
+      "command": "ctest",
+      "args": [
+        "--test-dir",
+        "${workspaceFolder}/build",
+        "--output-on-failure"
+      ],
+      "dependsOn": "CMake: Build",
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "group": "test"
+    },
+    {
+      "label": "Config: Reset Local Copy from Example",
+      "type": "process",
+      "command": "cmake",
+      "args": [
+        "-E",
+        "copy_if_different",
+        "${workspaceFolder}/config/specter-sense.example.json",
+        "${workspaceFolder}/config/specter-sense.local.json"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Synthetic Service",
+      "type": "process",
+      "command": "${workspaceFolder}/build/specter-sense",
+      "args": [
+        "--source",
+        "synthetic",
+        "--config",
+        "${workspaceFolder}/config/specter-sense.example.json",
+        "--output",
+        "${workspaceFolder}/state/specter-sense.json"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+        }
+      },
+      "dependsOn": "CMake: Build",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Synthetic Calibrator",
+      "type": "process",
+      "command": "${workspaceFolder}/build/specter-sense-calibrate",
+      "args": [
+        "--source",
+        "synthetic",
+        "--config",
+        "${workspaceFolder}/config/specter-sense.local.json"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+        }
+      },
+      "dependsOn": "CMake: Build",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Kinect Service",
+      "type": "process",
+      "command": "${workspaceFolder}/build/specter-sense",
+      "args": [
+        "--source",
+        "kinect",
+        "--config",
+        "${workspaceFolder}/config/specter-sense.local.json",
+        "--output",
+        "${workspaceFolder}/state/specter-sense.json"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+        }
+      },
+      "dependsOn": "CMake: Build",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Kinect Calibrator",
+      "type": "process",
+      "command": "${workspaceFolder}/build/specter-sense-calibrate",
+      "args": [
+        "--source",
+        "kinect",
+        "--config",
+        "${workspaceFolder}/config/specter-sense.local.json"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+        }
+      },
+      "dependsOn": "CMake: Build",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    }
+  ]
+}
