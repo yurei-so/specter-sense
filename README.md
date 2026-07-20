@@ -2,7 +2,7 @@
 
 Privacy-first spatial awareness for LLM-powered home assistants.
 
-`specter-sense` turns Kinect V2 depth frames into compact local room-zone occupancy state. Raw camera frames remain in memory and are not persisted. The first milestone intentionally stops at depth acquisition, room-coordinate foreground detection, configured zones, and atomic JSON publication.
+`specter-sense` turns Kinect V2 depth frames into compact local room-zone occupancy state. Raw camera frames remain in memory and are not persisted. The core service stops at depth acquisition, room-coordinate foreground detection, configured zones, and local state publication.
 
 ## Current scope
 
@@ -63,7 +63,7 @@ Omit `--frames` to run until `SIGINT` or `SIGTERM`.
   --output state/specter-sense.json
 ```
 
-Only the depth stream is requested. Startup and reconnect events go to stderr as one-line JSON. After three consecutive frame timeouts the device is reopened with exponential backoff capped at 32 seconds. The state file reports timeout, stale, and reconnect conditions instead of retaining a silently healthy sensor state.
+Only the depth stream is requested. Startup and reconnect events go to stderr as one-line JSON. After three consecutive frame timeouts the device is reopened with exponential backoff capped at 32 seconds. Socket state—and the optional state file when enabled—reports timeout, stale, and reconnect conditions instead of retaining a silently healthy sensor state.
 
 ## Room coordinates and calibration
 
@@ -135,9 +135,51 @@ See [config/specter-sense.example.json](config/specter-sense.example.json).
 
 Thresholds are sensor-resolution and scene dependent. Tune them from observations in the real room rather than treating the example values as universal.
 
-## State contract
+## Live local API
 
-The primary interface is one atomically replaced JSON file. A snapshot resembles:
+The primary integration interface is a permission-controlled Unix domain socket. By default the service listens at:
+
+```text
+$XDG_RUNTIME_DIR/specter-sense.sock
+```
+
+If `XDG_RUNTIME_DIR` is unavailable, it falls back to `/tmp/specter-sense-<uid>.sock`. The socket is created with mode `0600`, supports multiple simultaneous clients, detects and removes stale socket files, and refuses to replace an active listener or a non-socket filesystem entry.
+
+Each client receives newline-delimited JSON. Connecting immediately produces a complete snapshot:
+
+```json
+{"type":"snapshot","sequence":12,"state":{"schema_version":1,"sensor":{},"zones":{}}}
+```
+
+The service then emits complete state envelopes with a reason:
+
+```json
+{"type":"state","sequence":13,"reason":"occupancy_changed","state":{}}
+{"type":"state","sequence":14,"reason":"health_changed","state":{}}
+{"type":"state","sequence":15,"reason":"observation","state":{}}
+```
+
+Occupancy and health transitions publish immediately. Observation messages default to 10 Hz so consumers receive current evidence, centroid, and range data without tying updates to disk writes. `sequence` increases monotonically for the lifetime of the process. Clients should reconnect after EOF and treat the next `snapshot` as authoritative.
+
+Inspect the stream from a terminal:
+
+```sh
+socat -u UNIX-CONNECT:"$XDG_RUNTIME_DIR/specter-sense.sock" -
+```
+
+When `XDG_RUNTIME_DIR` is unavailable, connect to `/tmp/specter-sense-$(id -u).sock` instead. Override behavior with:
+
+```text
+--socket PATH
+--socket-interval-ms 100
+--no-socket
+```
+
+Slow or abandoned consumers are disconnected once their pending output exceeds 1 MiB, preventing them from stalling depth processing.
+
+## Optional state file
+
+The service does not write state to disk by default. Pass `--output PATH` when a human-readable last-known snapshot is useful; it is atomically replaced at most once per second instead of once per depth frame. `--no-state-file` explicitly disables it when wrapping an older command line. A snapshot resembles:
 
 ```json
 {

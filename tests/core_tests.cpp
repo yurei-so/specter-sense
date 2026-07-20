@@ -1,15 +1,25 @@
 #include "specter_sense/config.hpp"
 #include "specter_sense/pipeline.hpp"
+#include "specter_sense/socket_publisher.hpp"
 #include "specter_sense/state_writer.hpp"
 
 #include <boost/json.hpp>
 
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 namespace {
 
@@ -103,6 +113,70 @@ void config_round_trip_test() {
   require(loaded.zones.size() == 1 && loaded.zones.front().name == "room", "atomic config round-trip failed");
 }
 
+std::string receive_message(int fd) {
+  pollfd descriptor{fd, POLLIN, 0};
+  require(::poll(&descriptor, 1, 1000) == 1, "timed out waiting for socket publisher");
+  std::array<char, 16384> buffer{};
+  const auto received = ::recv(fd, buffer.data(), buffer.size(), 0);
+  require(received > 0, "socket publisher closed without a message");
+  return {buffer.data(), static_cast<std::size_t>(received)};
+}
+
+void socket_publisher_test() {
+  const auto path = std::filesystem::temp_directory_path() /
+      ("specter-sense-socket-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock");
+  int client = -1;
+  {
+    std::unique_ptr<specter::SocketPublisher> publisher;
+    try {
+      publisher = std::make_unique<specter::SocketPublisher>(path, std::chrono::hours(1));
+    } catch (const std::runtime_error& error) {
+      if (std::string(error.what()).find("Operation not permitted") != std::string::npos) {
+        std::cout << "socket publisher test skipped: sandbox forbids Unix sockets\n";
+        return;
+      }
+      throw;
+    }
+    specter::Snapshot snapshot;
+    snapshot.generated_at = std::chrono::system_clock::now();
+    snapshot.last_valid_frame_at = snapshot.generated_at;
+    snapshot.sensor = {true, false, "streaming"};
+    snapshot.zones = {{"room", false, 0, 0, std::nullopt, std::nullopt, std::nullopt, snapshot.generated_at}};
+    publisher->publish(snapshot);
+
+    client = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    require(client >= 0, "failed to create socket test client");
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    const auto path_text = path.string();
+    require(path_text.size() < sizeof(address.sun_path), "test socket path too long");
+    std::memcpy(address.sun_path, path_text.c_str(), path_text.size() + 1);
+    require(::connect(client, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0,
+            "failed to connect socket test client");
+    publisher->publish(snapshot);
+    const auto first = boost::json::parse(receive_message(client)).as_object();
+    require(first.at("type").as_string() == "snapshot", "new client did not receive a snapshot");
+    require(first.at("state").as_object().at("zones").as_object().contains("room"), "snapshot omitted zone state");
+
+    snapshot.generated_at = std::chrono::system_clock::now();
+    snapshot.zones[0].occupied = true;
+    publisher->publish(snapshot);
+    const auto changed = boost::json::parse(receive_message(client)).as_object();
+    require(changed.at("type").as_string() == "state", "occupancy change did not emit state event");
+    require(changed.at("reason").as_string() == "occupancy_changed", "occupancy event reason mismatch");
+    require(changed.at("sequence").to_number<std::uint64_t>() > first.at("sequence").to_number<std::uint64_t>(),
+            "sequence did not increase");
+
+    struct stat metadata{};
+    require(::stat(path.c_str(), &metadata) == 0, "publisher socket path disappeared");
+    require((metadata.st_mode & 0777) == 0600, "publisher socket permissions are not 0600");
+    ::close(client);
+    client = -1;
+  }
+  if (client >= 0) ::close(client);
+  require(!std::filesystem::exists(path), "publisher did not remove its socket on shutdown");
+}
+
 void json_test() {
   specter::Snapshot snapshot;
   snapshot.generated_at = std::chrono::system_clock::now();
@@ -122,6 +196,7 @@ int main() {
     pipeline_test();
     validation_test();
     config_round_trip_test();
+    socket_publisher_test();
     json_test();
     std::cout << "all core tests passed\n";
   } catch (const std::exception& error) {

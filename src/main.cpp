@@ -1,17 +1,22 @@
 #include "specter_sense/config.hpp"
 #include "specter_sense/frame_source.hpp"
 #include "specter_sense/pipeline.hpp"
+#include "specter_sense/socket_publisher.hpp"
 #include "specter_sense/state_writer.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+
+#include <unistd.h>
 
 namespace {
 
@@ -20,13 +25,22 @@ void stop(int) { running = false; }
 
 struct Options {
   std::filesystem::path config{"config/specter-sense.example.json"};
-  std::filesystem::path output{"state/specter-sense.json"};
+  std::optional<std::filesystem::path> output;
+  std::optional<std::filesystem::path> socket;
+  std::chrono::milliseconds socket_interval{100};
   std::string source{"synthetic"};
   std::size_t frames{};
 };
 
+std::filesystem::path default_socket_path() {
+  if (const char* runtime = std::getenv("XDG_RUNTIME_DIR"); runtime && *runtime)
+    return std::filesystem::path(runtime) / "specter-sense.sock";
+  return std::filesystem::path("/tmp") / ("specter-sense-" + std::to_string(::getuid()) + ".sock");
+}
+
 Options parse_options(int argc, char** argv) {
   Options options;
+  options.socket = default_socket_path();
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto value = [&]() -> std::string {
@@ -35,10 +49,15 @@ Options parse_options(int argc, char** argv) {
     };
     if (arg == "--config") options.config = value();
     else if (arg == "--output") options.output = value();
+    else if (arg == "--no-state-file") options.output.reset();
+    else if (arg == "--socket") options.socket = value();
+    else if (arg == "--no-socket") options.socket.reset();
+    else if (arg == "--socket-interval-ms") options.socket_interval = std::chrono::milliseconds(std::stoll(value()));
     else if (arg == "--source") options.source = value();
     else if (arg == "--frames") options.frames = static_cast<std::size_t>(std::stoull(value()));
     else if (arg == "--help") {
-      std::cout << "Usage: specter-sense [--config PATH] [--output PATH] "
+      std::cout << "Usage: specter-sense [--config PATH] [--output PATH|--no-state-file] "
+                   "[--socket PATH|--no-socket] [--socket-interval-ms N] "
                    "[--source synthetic|kinect] [--frames N]\n";
       std::exit(0);
     } else throw std::runtime_error("unknown argument: " + arg);
@@ -56,12 +75,6 @@ std::unique_ptr<specter::FrameSource> make_source(const std::string& name) {
   throw std::runtime_error("unknown source: " + name);
 }
 
-void interruptible_sleep(std::chrono::milliseconds duration) {
-  const auto deadline = std::chrono::steady_clock::now() + duration;
-  while (running && std::chrono::steady_clock::now() < deadline)
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -69,6 +82,8 @@ int main(int argc, char** argv) {
     const auto options = parse_options(argc, argv);
     const auto config = specter::load_config(options.config);
     specter::OccupancyPipeline pipeline(config);
+    std::unique_ptr<specter::SocketPublisher> socket;
+    if (options.socket) socket = std::make_unique<specter::SocketPublisher>(*options.socket, options.socket_interval);
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
     specter::Snapshot snapshot;
@@ -77,6 +92,17 @@ int main(int argc, char** argv) {
     std::size_t completed{};
     std::size_t missed{};
     unsigned reconnect_attempt{};
+    auto next_file_write = std::chrono::steady_clock::time_point::min();
+    auto publish_outputs = [&](bool force_file = false) {
+      if (socket) socket->publish(snapshot);
+      const auto now = std::chrono::steady_clock::now();
+      if (options.output && (force_file || now >= next_file_write)) {
+        write_snapshot_atomic(*options.output, snapshot);
+        next_file_write = now + std::chrono::seconds(1);
+      }
+    };
+    publish_outputs(true);
+    if (socket) std::cerr << "{\"event\":\"socket_listening\",\"path\":\"" << socket->path().string() << "\"}\n";
     while (running && (options.frames == 0 || completed < options.frames)) {
       snapshot.generated_at = std::chrono::system_clock::now();
       if (!source) {
@@ -89,13 +115,17 @@ int main(int argc, char** argv) {
         } catch (const std::exception& error) {
           ++reconnect_attempt;
           snapshot.sensor = {false, true, "reconnect_backoff"};
-          write_snapshot_atomic(options.output, snapshot);
+          publish_outputs(true);
           const auto exponent = std::min(reconnect_attempt - 1, 5U);
           const auto backoff = std::chrono::seconds(1U << exponent);
           std::cerr << "{\"event\":\"source_connect_failed\",\"attempt\":" << reconnect_attempt
                     << ",\"backoff_ms\":" << std::chrono::duration_cast<std::chrono::milliseconds>(backoff).count()
                     << ",\"error\":\"" << error.what() << "\"}\n";
-          interruptible_sleep(backoff);
+          const auto deadline = std::chrono::steady_clock::now() + backoff;
+          while (running && std::chrono::steady_clock::now() < deadline) {
+            publish_outputs();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          }
           continue;
         }
       }
@@ -117,8 +147,11 @@ int main(int argc, char** argv) {
         snapshot.sensor = {false, true, missed >= 3 ? "stale" : "frame_timeout"};
         if (missed >= 3) source.reset();
       }
-      write_snapshot_atomic(options.output, snapshot);
+      publish_outputs();
     }
+    snapshot.generated_at = std::chrono::system_clock::now();
+    snapshot.sensor = {false, false, "stopped"};
+    publish_outputs(true);
     std::cerr << "{\"event\":\"stopped\",\"frames\":" << completed << "}\n";
     return 0;
   } catch (const std::exception& error) {
