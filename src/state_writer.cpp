@@ -59,6 +59,28 @@ boost::json::value snapshot_to_json(const Snapshot& snapshot) {
     zones[zone.name] = std::move(item);
   }
   root["zones"] = std::move(zones);
+  boost::json::object tracks;
+  for (const auto& track : snapshot.tracks) {
+    const auto age = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
+        generated - track.observed_at).count());
+    boost::json::array track_zones;
+    for (const auto& zone : track.zones) track_zones.push_back(boost::json::value(zone));
+    tracks[track.id] = {
+        {"tracking_state", track.tracking_state},
+        {"classification", track.classification},
+        {"classification_confidence", track.classification_confidence},
+        {"posture", track.posture},
+        {"posture_confidence", track.posture_confidence},
+        {"centroid_m", {{"x", track.centroid_m.x}, {"y", track.centroid_m.y}, {"z", track.centroid_m.z}}},
+        {"velocity_mps", {{"x", track.velocity_mps.x}, {"y", track.velocity_mps.y}, {"z", track.velocity_mps.z}}},
+        {"bounds_m", {{"width", track.bounds_m.x}, {"depth", track.bounds_m.y}, {"height", track.bounds_m.z}}},
+        {"foreground_points", track.foreground_points},
+        {"zones", std::move(track_zones)},
+        {"occluded", track.occluded},
+        {"observed_at", timestamp(track.observed_at)},
+        {"age_ms", age}};
+  }
+  root["tracks"] = std::move(tracks);
   return root;
 }
 

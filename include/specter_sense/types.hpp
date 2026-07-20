@@ -63,9 +63,19 @@ struct ProcessingConfig {
   std::size_t warmup_frames{30};
 };
 
+struct TrackingConfig {
+  bool enabled{true};
+  double voxel_size_m{0.06};
+  std::size_t min_cluster_points{80};
+  double association_max_distance_m{0.75};
+  std::size_t confirmation_frames{3};
+  std::size_t max_missed_frames{20};
+};
+
 struct AppConfig {
   Transform camera_to_room;
   ProcessingConfig processing;
+  TrackingConfig tracking;
   std::vector<ZoneConfig> zones;
 };
 
@@ -86,11 +96,28 @@ struct SensorState {
   std::string status{"starting"};
 };
 
+struct TrackState {
+  std::string id;
+  std::string tracking_state{"tentative"};
+  std::string classification{"unknown"};
+  double classification_confidence{};
+  std::string posture{"unknown"};
+  double posture_confidence{};
+  Point3 centroid_m;
+  Point3 velocity_mps;
+  Point3 bounds_m;
+  std::size_t foreground_points{};
+  std::vector<std::string> zones;
+  bool occluded{};
+  std::chrono::system_clock::time_point observed_at;
+};
+
 struct Snapshot {
   std::chrono::system_clock::time_point generated_at;
   std::optional<std::chrono::system_clock::time_point> last_valid_frame_at;
   SensorState sensor;
   std::vector<ZoneState> zones;
+  std::vector<TrackState> tracks;
 };
 
 }  // namespace specter

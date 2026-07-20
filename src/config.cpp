@@ -28,6 +28,12 @@ std::size_t size_value(const boost::json::object& object, const char* key) {
   return static_cast<std::size_t>(value);
 }
 
+bool bool_value(const boost::json::object& object, const char* key) {
+  const auto& value = object.at(key);
+  if (!value.is_bool()) throw std::runtime_error(std::string(key) + " must be a boolean");
+  return value.as_bool();
+}
+
 double orientation(Point2 a, Point2 b, Point2 c) {
   return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
@@ -67,6 +73,16 @@ AppConfig load_config(const std::filesystem::path& path) {
   config.processing.background_alpha = number(processing, "background_alpha");
   config.processing.warmup_frames = size_value(processing, "warmup_frames");
 
+  if (const auto* value = root.if_contains("tracking")) {
+    const auto& tracking = value->as_object();
+    config.tracking.enabled = bool_value(tracking, "enabled");
+    config.tracking.voxel_size_m = number(tracking, "voxel_size_m");
+    config.tracking.min_cluster_points = size_value(tracking, "min_cluster_points");
+    config.tracking.association_max_distance_m = number(tracking, "association_max_distance_m");
+    config.tracking.confirmation_frames = size_value(tracking, "confirmation_frames");
+    config.tracking.max_missed_frames = size_value(tracking, "max_missed_frames");
+  }
+
   for (const auto& zone_value : root.at("zones").as_array()) {
     const auto& object = zone_value.as_object();
     ZoneConfig zone;
@@ -105,6 +121,17 @@ void validate_config(const AppConfig& config) {
   if (!(p.foreground_delta_m > 0)) throw std::runtime_error("foreground_delta_m must be positive");
   if (!(p.background_alpha >= 0 && p.background_alpha <= 1))
     throw std::runtime_error("background_alpha must be between 0 and 1");
+  const auto& tracking = config.tracking;
+  if (!(tracking.voxel_size_m >= 0.02 && tracking.voxel_size_m <= 0.25))
+    throw std::runtime_error("tracking voxel_size_m must be between 0.02 and 0.25");
+  if (tracking.min_cluster_points == 0)
+    throw std::runtime_error("tracking min_cluster_points must be positive");
+  if (!(tracking.association_max_distance_m > 0 && tracking.association_max_distance_m <= 5))
+    throw std::runtime_error("tracking association_max_distance_m must be between 0 and 5");
+  if (tracking.confirmation_frames == 0)
+    throw std::runtime_error("tracking confirmation_frames must be positive");
+  if (tracking.max_missed_frames == 0)
+    throw std::runtime_error("tracking max_missed_frames must be positive");
   if (config.zones.empty()) throw std::runtime_error("at least one zone is required");
   std::set<std::string> names;
   for (const auto& zone : config.zones) {
@@ -148,6 +175,13 @@ std::string serialize_config(const AppConfig& config) {
       {"foreground_delta_m", config.processing.foreground_delta_m},
       {"background_alpha", config.processing.background_alpha},
       {"warmup_frames", config.processing.warmup_frames}};
+  boost::json::object tracking{
+      {"enabled", config.tracking.enabled},
+      {"voxel_size_m", config.tracking.voxel_size_m},
+      {"min_cluster_points", config.tracking.min_cluster_points},
+      {"association_max_distance_m", config.tracking.association_max_distance_m},
+      {"confirmation_frames", config.tracking.confirmation_frames},
+      {"max_missed_frames", config.tracking.max_missed_frames}};
   boost::json::array zones;
   for (const auto& zone : config.zones) {
     boost::json::array polygon;
@@ -165,6 +199,7 @@ std::string serialize_config(const AppConfig& config) {
   return boost::json::serialize(boost::json::object{
       {"camera_to_room", std::move(transform)},
       {"processing", std::move(processing)},
+      {"tracking", std::move(tracking)},
       {"zones", std::move(zones)}}) + "\n";
 }
 

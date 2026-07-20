@@ -157,6 +157,7 @@ int main(int argc, char** argv) {
       snapshot.generated_at = std::chrono::system_clock::now();
       if (frame) {
         snapshot.zones = pipeline.process(*frame);
+        snapshot.tracks = pipeline.last_tracks();
         snapshot.last_valid_frame_at = frame->observed_at;
         snapshot.sensor = {true, false, "streaming"};
         missed = 0;
@@ -164,12 +165,18 @@ int main(int argc, char** argv) {
       } else {
         ++missed;
         snapshot.sensor = {false, true, missed >= 3 ? "stale" : "frame_timeout"};
-        if (missed >= 3) source.reset();
+        if (missed >= 3) {
+          source.reset();
+          pipeline.reset_tracking();
+          snapshot.tracks.clear();
+        }
       }
       publish_outputs();
     }
     snapshot.generated_at = std::chrono::system_clock::now();
     snapshot.sensor = {false, false, "stopped"};
+    pipeline.reset_tracking();
+    snapshot.tracks.clear();
     publish_outputs(true);
     std::cerr << "{\"event\":\"stopped\",\"frames\":" << completed << "}\n";
     return 0;

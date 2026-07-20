@@ -4,9 +4,148 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <queue>
+#include <set>
 #include <stdexcept>
+#include <tuple>
 
 namespace specter {
+namespace {
+
+struct ClusterObservation {
+  Point3 centroid;
+  Point3 bounds;
+  std::size_t points{};
+  std::string classification{"unknown"};
+  double classification_confidence{};
+  std::string posture{"unknown"};
+  double posture_confidence{};
+  std::vector<std::string> zones;
+};
+
+using VoxelKey = std::tuple<int, int, int>;
+
+struct Voxel {
+  std::size_t count{};
+  Point3 sum{};
+  Point3 minimum{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(),
+                 std::numeric_limits<double>::infinity()};
+  Point3 maximum{-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+                 -std::numeric_limits<double>::infinity()};
+};
+
+double distance(Point3 a, Point3 b) {
+  return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) +
+                   (a.z - b.z) * (a.z - b.z));
+}
+
+std::pair<std::string, double> classify(const Point3& bounds) {
+  const double footprint = std::max(bounds.x, bounds.y);
+  if (bounds.z >= 1.05 && bounds.z <= 2.35 && footprint >= 0.20 && footprint <= 1.25) {
+    const double height_score = 1.0 - std::min(1.0, std::abs(bounds.z - 1.7) / 0.8);
+    return {"likely_human", 0.55 + 0.4 * height_score};
+  }
+  if (bounds.z >= 0.15 && bounds.z <= 0.90 && footprint >= 0.30 && footprint <= 1.60)
+    return {"likely_animal", 0.60};
+  if (bounds.z > 2.5 || footprint > 2.0) return {"likely_object", 0.70};
+  return {"unknown", 0.25};
+}
+
+std::pair<std::string, double> infer_posture(const Point3& bounds, double minimum_z) {
+  const double footprint = std::max(bounds.x, bounds.y);
+  if (bounds.z >= 1.25 && bounds.z / std::max(0.15, footprint) >= 1.15)
+    return {"standing", 0.82};
+  if (bounds.z <= 0.70 && footprint >= 0.85 && footprint / std::max(0.15, bounds.z) >= 1.35)
+    return {"lying", 0.78};
+  if (bounds.z >= 0.65 && bounds.z < 1.25) {
+    if (minimum_z <= 0.15 && footprint < 0.85) return {"crouching", 0.55};
+    return {"sitting", 0.52};
+  }
+  return {"unknown", 0.20};
+}
+
+std::vector<ClusterObservation> cluster_points(
+    const std::vector<Point3>& points, const AppConfig& config) {
+  std::map<VoxelKey, Voxel> voxels;
+  const double size = config.tracking.voxel_size_m;
+  for (const auto& point : points) {
+    const VoxelKey key{static_cast<int>(std::floor(point.x / size)),
+                       static_cast<int>(std::floor(point.y / size)),
+                       static_cast<int>(std::floor(point.z / size))};
+    auto& voxel = voxels[key];
+    ++voxel.count;
+    voxel.sum.x += point.x;
+    voxel.sum.y += point.y;
+    voxel.sum.z += point.z;
+    voxel.minimum.x = std::min(voxel.minimum.x, point.x);
+    voxel.minimum.y = std::min(voxel.minimum.y, point.y);
+    voxel.minimum.z = std::min(voxel.minimum.z, point.z);
+    voxel.maximum.x = std::max(voxel.maximum.x, point.x);
+    voxel.maximum.y = std::max(voxel.maximum.y, point.y);
+    voxel.maximum.z = std::max(voxel.maximum.z, point.z);
+  }
+
+  std::set<VoxelKey> visited;
+  std::vector<ClusterObservation> result;
+  for (const auto& [start, ignored] : voxels) {
+    (void)ignored;
+    if (visited.contains(start)) continue;
+    std::queue<VoxelKey> pending;
+    pending.push(start);
+    visited.insert(start);
+    std::size_t count{};
+    Point3 sum{};
+    Point3 minimum{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(),
+                   std::numeric_limits<double>::infinity()};
+    Point3 maximum{-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+                   -std::numeric_limits<double>::infinity()};
+    while (!pending.empty()) {
+      const auto key = pending.front();
+      pending.pop();
+      const auto& voxel = voxels.at(key);
+      count += voxel.count;
+      sum.x += voxel.sum.x;
+      sum.y += voxel.sum.y;
+      sum.z += voxel.sum.z;
+      minimum.x = std::min(minimum.x, voxel.minimum.x);
+      minimum.y = std::min(minimum.y, voxel.minimum.y);
+      minimum.z = std::min(minimum.z, voxel.minimum.z);
+      maximum.x = std::max(maximum.x, voxel.maximum.x);
+      maximum.y = std::max(maximum.y, voxel.maximum.y);
+      maximum.z = std::max(maximum.z, voxel.maximum.z);
+      const auto [x, y, z] = key;
+      for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy)
+          for (int dz = -1; dz <= 1; ++dz) {
+            if (dx == 0 && dy == 0 && dz == 0) continue;
+            const VoxelKey neighbor{x + dx, y + dy, z + dz};
+            if (voxels.contains(neighbor) && visited.insert(neighbor).second) pending.push(neighbor);
+          }
+    }
+    if (count < config.tracking.min_cluster_points) continue;
+    ClusterObservation observation;
+    const double divisor = static_cast<double>(count);
+    observation.centroid = {sum.x / divisor, sum.y / divisor, sum.z / divisor};
+    observation.bounds = {maximum.x - minimum.x, maximum.y - minimum.y, maximum.z - minimum.z};
+    observation.points = count;
+    std::tie(observation.classification, observation.classification_confidence) = classify(observation.bounds);
+    if (observation.classification == "likely_human")
+      std::tie(observation.posture, observation.posture_confidence) = infer_posture(observation.bounds, minimum.z);
+    for (const auto& zone : config.zones)
+      if (observation.centroid.z >= zone.min_height_m && observation.centroid.z <= zone.max_height_m &&
+          point_in_polygon({observation.centroid.x, observation.centroid.y}, zone.floor_polygon))
+        observation.zones.push_back(zone.name);
+    result.push_back(std::move(observation));
+  }
+  std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+    return std::tie(left.centroid.x, left.centroid.y, left.centroid.z) <
+           std::tie(right.centroid.x, right.centroid.y, right.centroid.z);
+  });
+  return result;
+}
+
+}  // namespace
 
 Point3 transform_point(const Transform& transform, const Point3& point) {
   const auto& m = transform.matrix;
@@ -39,7 +178,7 @@ bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon) {
 
 OccupancyPipeline::OccupancyPipeline(AppConfig config, bool retain_foreground_points)
     : config_(std::move(config)), runtime_(config_.zones.size()),
-      retain_foreground_points_(retain_foreground_points) {
+      retain_foreground_points_(retain_foreground_points), tracking_enabled_(config_.tracking.enabled) {
   validate_config(config_);
 }
 
@@ -84,7 +223,7 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
     const auto v = static_cast<double>(index / frame.width);
     const Point3 camera = deproject_depth(frame.intrinsics, u, v, depth_m);
     const Point3 room = transform_point(config_.camera_to_room, camera);
-    if (retain_foreground_points_) last_foreground_points_.push_back(room);
+    if (retain_foreground_points_ || tracking_enabled_) last_foreground_points_.push_back(room);
     for (std::size_t zone_index = 0; zone_index < config_.zones.size(); ++zone_index) {
       const auto& zone = config_.zones[zone_index];
       if (room.z < zone.min_height_m || room.z > zone.max_height_m ||
@@ -132,7 +271,119 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
     }
     states.push_back(std::move(state));
   }
+
+  last_tracks_.clear();
+  if (!tracking_enabled_) return states;
+  const auto observations = cluster_points(last_foreground_points_, config_);
+  struct Candidate { std::size_t track{}; std::size_t observation{}; double cost{}; };
+  std::vector<Candidate> candidates;
+  for (std::size_t track_index = 0; track_index < tracks_.size(); ++track_index) {
+    const auto& track = tracks_[track_index];
+    const double dt = std::clamp(
+        std::chrono::duration<double>(frame.observed_at - track.observed_at).count(), 1.0 / 120.0, 0.5);
+    const Point3 predicted{track.centroid.x + track.velocity.x * dt,
+                           track.centroid.y + track.velocity.y * dt,
+                           track.centroid.z + track.velocity.z * dt};
+    for (std::size_t observation_index = 0; observation_index < observations.size(); ++observation_index) {
+      const auto& observation = observations[observation_index];
+      const double position_cost = distance(predicted, observation.centroid);
+      if (position_cost > config_.tracking.association_max_distance_m) continue;
+      const double shape_cost = distance(track.bounds, observation.bounds);
+      if (shape_cost > 1.5) continue;
+      candidates.push_back({track_index, observation_index, position_cost + 0.25 * shape_cost});
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+    return left.cost < right.cost;
+  });
+  std::vector<bool> track_matched(tracks_.size());
+  std::vector<bool> observation_matched(observations.size());
+  for (const auto& candidate : candidates) {
+    if (track_matched[candidate.track] || observation_matched[candidate.observation]) continue;
+    auto& track = tracks_[candidate.track];
+    const auto& observation = observations[candidate.observation];
+    const double dt = std::clamp(
+        std::chrono::duration<double>(frame.observed_at - track.observed_at).count(), 1.0 / 120.0, 0.5);
+    const Point3 measured_velocity{(observation.centroid.x - track.centroid.x) / dt,
+                                   (observation.centroid.y - track.centroid.y) / dt,
+                                   (observation.centroid.z - track.centroid.z) / dt};
+    track.velocity = {0.65 * track.velocity.x + 0.35 * measured_velocity.x,
+                      0.65 * track.velocity.y + 0.35 * measured_velocity.y,
+                      0.65 * track.velocity.z + 0.35 * measured_velocity.z};
+    track.centroid = {0.25 * track.centroid.x + 0.75 * observation.centroid.x,
+                      0.25 * track.centroid.y + 0.75 * observation.centroid.y,
+                      0.25 * track.centroid.z + 0.75 * observation.centroid.z};
+    track.bounds = {0.35 * track.bounds.x + 0.65 * observation.bounds.x,
+                    0.35 * track.bounds.y + 0.65 * observation.bounds.y,
+                    0.35 * track.bounds.z + 0.65 * observation.bounds.z};
+    track.foreground_points = observation.points;
+    track.classification = observation.classification;
+    track.classification_confidence = observation.classification_confidence;
+    if (observation.posture == track.posture_candidate) ++track.posture_candidate_frames;
+    else {
+      track.posture_candidate = observation.posture;
+      track.posture_candidate_frames = 1;
+    }
+    if (track.posture_candidate_frames >= config_.tracking.confirmation_frames) {
+      track.posture = observation.posture;
+      track.posture_confidence = observation.posture_confidence;
+    }
+    track.zones = observation.zones;
+    track.observed_at = frame.observed_at;
+    ++track.hits;
+    track.missed = 0;
+    track_matched[candidate.track] = true;
+    observation_matched[candidate.observation] = true;
+  }
+  for (std::size_t i = 0; i < tracks_.size(); ++i) if (!track_matched[i]) ++tracks_[i].missed;
+  for (std::size_t i = 0; i < observations.size(); ++i) {
+    if (observation_matched[i]) continue;
+    const auto& observation = observations[i];
+    TrackRuntime track;
+    track.id = next_track_id_++;
+    track.centroid = observation.centroid;
+    track.bounds = observation.bounds;
+    track.foreground_points = observation.points;
+    track.classification = observation.classification;
+    track.classification_confidence = observation.classification_confidence;
+    track.posture_candidate = observation.posture;
+    track.posture_candidate_frames = 1;
+    track.observed_at = frame.observed_at;
+    track.zones = observation.zones;
+    track.hits = 1;
+    tracks_.push_back(std::move(track));
+  }
+  std::erase_if(tracks_, [&](const auto& track) { return track.missed > config_.tracking.max_missed_frames; });
+  for (const auto& track : tracks_) {
+    if (track.hits < config_.tracking.confirmation_frames) continue;
+    TrackState state;
+    state.id = "track-" + std::to_string(track.id);
+    state.tracking_state = track.missed == 0 ? "confirmed" : "coasting";
+    state.classification = track.classification;
+    state.classification_confidence = track.classification_confidence;
+    state.posture = track.posture;
+    state.posture_confidence = track.posture_confidence;
+    state.centroid_m = track.centroid;
+    state.velocity_mps = track.velocity;
+    state.bounds_m = track.bounds;
+    state.foreground_points = track.foreground_points;
+    state.zones = track.zones;
+    state.occluded = track.missed > 0;
+    state.observed_at = track.observed_at;
+    last_tracks_.push_back(std::move(state));
+  }
   return states;
+}
+
+void OccupancyPipeline::reset_tracking() {
+  tracks_.clear();
+  last_tracks_.clear();
+}
+
+void OccupancyPipeline::set_tracking_enabled(bool enabled) {
+  if (tracking_enabled_ == enabled) return;
+  tracking_enabled_ = enabled;
+  reset_tracking();
 }
 
 }  // namespace specter

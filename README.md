@@ -12,11 +12,13 @@ Privacy-first spatial awareness for LLM-powered home assistants.
 - Slowly adapting per-pixel background model
 - Separate enter/exit evidence thresholds and time hysteresis
 - Boolean occupancy, evidence score, metric centroid, and range bounds
+- Anonymous multi-object clustering with ephemeral process-local track IDs
+- Geometry-only human/animal/object/unknown classification and coarse posture
 - Atomic current-state JSON and structured operational logs
 - Bounded sensor reconnect backoff
 - Synthetic source and hardware-independent core tests
 
-Home Assistant, MQTT, dashboards, pose inference, identities, person counts, furniture reconstruction, and distributed processing are deliberately out of scope.
+Home Assistant, MQTT, dashboards, skeletal pose inference, persistent identities, biometrics, furniture reconstruction, and distributed processing are deliberately out of scope. Track IDs are anonymous and expire on sensor reset or process restart.
 
 ## Build
 
@@ -98,6 +100,8 @@ LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib \
 
 Use `--source synthetic` to learn the editor without the camera. The utility never requests RGB and does not persist depth frames. The side panel can freeze a representative depth point cloud in memory while geometry is edited.
 
+Object tracking visualization is optional and off by default in the calibrator. Click **Object Tracking Off** in the side panel to enable it, or start with `--object-tracking`. The overlay uses the same runtime clustering, classification, association, and posture pipeline: confirmed tracks appear as colored room-space bounds labeled with their ephemeral ID, class, and posture; coasting tracks remain visible with thinner bounds. Toggling the overlay clears its ephemeral tracks but preserves the learned foreground background, so tracking can restart without another warmup period. This display-only toggle does not change the saved `tracking.enabled` configuration value.
+
 Suggested bedroom-mapping workflow:
 
 1. Aim the Kinect so a useful patch of floor and the relevant occupied volumes are visible.
@@ -115,6 +119,7 @@ Viewport and editing controls:
 - Drag inside a selected top-down polygon: translate the entire zone
 - Right-drag: pan; mouse wheel: zoom
 - `Ctrl+N`: create a new bounding box
+- **Object Tracking On/Off**: toggle anonymous track bounds and labels without changing saved configuration
 - Every other editor action is a clickable panel control
 
 The editor rejects duplicate names, too-small or self-intersecting polygons, adjacent duplicate vertices, reversed/unreasonable height bounds, and coordinates outside ±50 metres before saving.
@@ -129,6 +134,17 @@ See [config/specter-sense.example.json](config/specter-sense.example.json).
 - `warmup_frames`: background-learning frames before foreground evidence is emitted.
 - `enter_points`, `exit_points`: Schmitt-trigger evidence thresholds; enter must be at least exit.
 - `enter_after_ms`, `exit_after_ms`: sustained evidence/absence required for a state transition. A longer exit delay prevents flicker.
+
+The optional top-level `tracking` object controls anonymous object tracking:
+
+- `enabled`: enable clustering, association, classification, and coarse posture.
+- `voxel_size_m`: room-space clustering resolution. Smaller values preserve detail but are more sensitive to holes.
+- `min_cluster_points`: discard foreground components below this raw-point count.
+- `association_max_distance_m`: maximum predicted-centroid displacement allowed when matching a track.
+- `confirmation_frames`: observations required before a tentative track is published; also supplies posture hysteresis.
+- `max_missed_frames`: bounded disappearance window before a track expires.
+
+When `tracking` is absent, the documented defaults are used. Classification and posture confidence values express strength of geometric evidence, not calibrated probabilities. `unknown` is an expected result for partial views, merged objects, ambiguous sitting/crouching geometry, and shapes outside the conservative rules.
 
 Thresholds are sensor-resolution and scene dependent. Tune them from observations in the real room rather than treating the example values as universal.
 
@@ -145,7 +161,7 @@ If `XDG_RUNTIME_DIR` is unavailable, it falls back to `/tmp/specter-sense-<uid>.
 Each client receives newline-delimited JSON. Connecting immediately produces a complete snapshot:
 
 ```json
-{"type":"snapshot","sequence":12,"state":{"schema_version":1,"sensor":{},"zones":{}}}
+{"type":"snapshot","sequence":12,"state":{"schema_version":1,"sensor":{},"zones":{},"tracks":{}}}
 ```
 
 The service then emits complete state envelopes with a reason:
@@ -157,6 +173,8 @@ The service then emits complete state envelopes with a reason:
 ```
 
 Occupancy and health transitions publish immediately. Observation messages default to 10 Hz so consumers receive current evidence, centroid, and range data without tying updates to disk writes. `sequence` increases monotonically for the lifetime of the process. Clients should reconnect after EOF and treat the next `snapshot` as authoritative.
+
+`tracks` is an additive schema-v1 field keyed by an ephemeral ID such as `track-3`. Each item reports `tracking_state` (`confirmed` or `coasting`), conservative classification and posture labels with confidence, room-space centroid/velocity/bounds, foreground evidence, intersected zone names, occlusion state, and freshness. IDs are meaningful only during the current uninterrupted sensor session and must never be treated as a person identity. Existing v1 consumers may ignore this field.
 
 Inspect the stream from a terminal:
 
@@ -225,12 +243,29 @@ The service does not write state to disk by default. Pass `--output PATH` when a
       "farthest_range_m": 1.91,
       "centroid_m": {"x": 0.42, "y": 1.55, "z": 0.83}
     }
+  },
+  "tracks": {
+    "track-3": {
+      "tracking_state": "confirmed",
+      "classification": "likely_human",
+      "classification_confidence": 0.82,
+      "posture": "standing",
+      "posture_confidence": 0.76,
+      "centroid_m": {"x": 0.4, "y": 1.8, "z": 0.9},
+      "velocity_mps": {"x": 0.1, "y": 0.0, "z": 0.0},
+      "bounds_m": {"width": 0.55, "depth": 0.38, "height": 1.71},
+      "foreground_points": 1320,
+      "zones": ["Futon"],
+      "occluded": false,
+      "observed_at": "2026-07-20T20:00:00.000Z",
+      "age_ms": 0
+    }
   }
 }
 ```
 
-`occupancy_score` is explicitly not a probability. It is the observed foreground-point count divided by `enter_points`, capped at 1. Range values are camera ranges; the centroid is in room coordinates. Consumers must check sensor health and freshness rather than trusting a stale `occupied` value.
+`occupancy_score` is explicitly not a probability. It is the observed foreground-point count divided by `enter_points`, capped at 1. Range values are camera ranges; centroids, velocities, and bounds are in room coordinates/metres. Consumers must check sensor health and freshness rather than trusting stale zone or track state.
 
 ## Privacy and debug policy
 
-The product is derived occupancy state. No code path currently writes RGB, IR, or depth frames. Any future frame capture or replay-recording feature must be explicit, visibly enabled, and off by default.
+The product is derived occupancy and anonymous tracking state. No code path currently writes RGB, IR, or depth frames. Track state contains geometry and motion only, and process-local IDs are cleared on sensor reset. Any future frame capture, replay recording, biometric classification, or cross-session identity feature must be explicit, visibly enabled, and separately reviewed.

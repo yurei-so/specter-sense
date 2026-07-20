@@ -104,6 +104,7 @@ void draw_text(double x, double y, const std::string& text, double scale = 2.0) 
 struct Options {
   std::filesystem::path config{"config/specter-sense.example.json"};
   std::string source{"kinect"};
+  bool object_tracking{};
 };
 
 Options parse_options(int argc, char** argv) {
@@ -120,8 +121,10 @@ Options parse_options(int argc, char** argv) {
     };
     if (arg == "--config") options.config = value();
     else if (arg == "--source") options.source = value();
+    else if (arg == "--object-tracking") options.object_tracking = true;
     else if (arg == "--help") {
-      std::cout << "Usage: specter-sense-calibrate [--config PATH] [--source kinect|synthetic]\n";
+      std::cout << "Usage: specter-sense-calibrate [--config PATH] [--source kinect|synthetic] "
+                   "[--object-tracking]\n";
       std::exit(0);
     } else throw std::runtime_error("unknown argument: " + arg);
   }
@@ -132,7 +135,10 @@ class CalibrationApp {
  public:
   explicit CalibrationApp(Options options)
       : options_(std::move(options)), config_(specter::load_config(options_.config)),
-        original_(config_), pipeline_(std::make_unique<specter::OccupancyPipeline>(config_, true)) {}
+        original_(config_), pipeline_(std::make_unique<specter::OccupancyPipeline>(config_, true)),
+        object_tracking_(options_.object_tracking) {
+    pipeline_->set_tracking_enabled(object_tracking_);
+  }
 
   int run() {
     if (!glfwInit()) throw std::runtime_error("GLFW initialization failed");
@@ -212,6 +218,7 @@ class CalibrationApp {
     try {
       zone_states_ = pipeline_->process(*frame_);
       foreground_points_ = pipeline_->last_foreground_points();
+      track_states_ = pipeline_->last_tracks();
     } catch (const std::exception& error) {
       status_ = std::string("PIPELINE: ") + error.what();
     }
@@ -221,6 +228,8 @@ class CalibrationApp {
     try {
       specter::validate_config(config_);
       pipeline_ = std::make_unique<specter::OccupancyPipeline>(config_, true);
+      pipeline_->set_tracking_enabled(object_tracking_);
+      track_states_.clear();
       status_ = "CONFIGURATION VALID";
     } catch (const std::exception& error) {
       status_ = std::string("INVALID: ") + error.what();
@@ -585,6 +594,12 @@ class CalibrationApp {
     else if (inside(x, y, left + 260, 464, 34, 26)) change_selected([](auto& z) { z.enter_after += std::chrono::milliseconds(50); });
     else if (inside(x, y, left, 502, 34, 26)) change_selected([](auto& z) { z.exit_after = std::max(std::chrono::milliseconds(0), z.exit_after - std::chrono::milliseconds(100)); });
     else if (inside(x, y, left + 260, 502, 34, 26)) change_selected([](auto& z) { z.exit_after += std::chrono::milliseconds(100); });
+    else if (inside(x, y, left, height - 168, 294, 30)) {
+      object_tracking_ = !object_tracking_;
+      pipeline_->set_tracking_enabled(object_tracking_);
+      track_states_.clear();
+      status_ = object_tracking_ ? "OBJECT TRACKING ENABLED" : "OBJECT TRACKING DISABLED";
+    }
     else if (inside(x, y, left, height - 52, 294, 34)) validate_for_preview();
   }
 
@@ -707,7 +722,45 @@ class CalibrationApp {
       glEnd();
     }
     for (std::size_t i = 0; i < config_.zones.size(); ++i) draw_zone(config_.zones[i], static_cast<int>(i) == selected_);
+    if (object_tracking_) draw_tracks();
     draw_gizmo();
+  }
+
+  void draw_tracks() {
+    for (const auto& track : track_states_) {
+      if (track.classification == "likely_human") glColor3f(0.15F, 1.0F, 0.8F);
+      else if (track.classification == "likely_animal") glColor3f(0.9F, 0.55F, 1.0F);
+      else if (track.classification == "likely_object") glColor3f(1.0F, 0.75F, 0.2F);
+      else glColor3f(0.75F, 0.78F, 0.82F);
+      const double min_x = track.centroid_m.x - track.bounds_m.x * 0.5;
+      const double max_x = track.centroid_m.x + track.bounds_m.x * 0.5;
+      const double min_y = track.centroid_m.y - track.bounds_m.y * 0.5;
+      const double max_y = track.centroid_m.y + track.bounds_m.y * 0.5;
+      const double min_z = track.centroid_m.z - track.bounds_m.z * 0.5;
+      const double max_z = track.centroid_m.z + track.bounds_m.z * 0.5;
+      glLineWidth(track.occluded ? 1.5F : 3.0F);
+      if (top_down_) {
+        glBegin(GL_LINE_LOOP);
+        glVertex3d(min_x, min_y, 0.09); glVertex3d(max_x, min_y, 0.09);
+        glVertex3d(max_x, max_y, 0.09); glVertex3d(min_x, max_y, 0.09);
+        glEnd();
+        continue;
+      }
+      glBegin(GL_LINE_LOOP);
+      glVertex3d(min_x, min_y, min_z); glVertex3d(max_x, min_y, min_z);
+      glVertex3d(max_x, max_y, min_z); glVertex3d(min_x, max_y, min_z);
+      glEnd();
+      glBegin(GL_LINE_LOOP);
+      glVertex3d(min_x, min_y, max_z); glVertex3d(max_x, min_y, max_z);
+      glVertex3d(max_x, max_y, max_z); glVertex3d(min_x, max_y, max_z);
+      glEnd();
+      glBegin(GL_LINES);
+      glVertex3d(min_x, min_y, min_z); glVertex3d(min_x, min_y, max_z);
+      glVertex3d(max_x, min_y, min_z); glVertex3d(max_x, min_y, max_z);
+      glVertex3d(max_x, max_y, min_z); glVertex3d(max_x, max_y, max_z);
+      glVertex3d(min_x, max_y, min_z); glVertex3d(min_x, max_y, max_z);
+      glEnd();
+    }
   }
 
   void draw_zone(const specter::ZoneConfig& zone, bool selected) {
@@ -775,6 +828,7 @@ class CalibrationApp {
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, width, height, 0, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     if (top_down_) draw_topdown_labels(width, height);
+    if (object_tracking_) draw_track_labels();
     glColor4f(0.055F, 0.065F, 0.085F, 0.98F);
     glBegin(GL_QUADS); glVertex2d(width - panel_width, 0); glVertex2d(width, 0); glVertex2d(width, height); glVertex2d(width - panel_width, height); glEnd();
     const double x = width - panel_width + 16;
@@ -817,6 +871,10 @@ class CalibrationApp {
       draw_stepper(x, 502, "EXIT DELAY", std::to_string(zone.exit_after.count()) + " MS");
     } else { glColor3f(0.7F, 0.7F, 0.72F); draw_text(x, y, "NO ZONE SELECTED", 1.5); }
     glColor3f(0.62F, 0.68F, 0.75F);
+    draw_button(x, height - 168, 294, 30,
+                object_tracking_ ? "OBJECT TRACKING ON  " + std::to_string(track_states_.size())
+                                 : "OBJECT TRACKING OFF",
+                object_tracking_);
     draw_text(x, height - 128, "CTRL+N  NEW BOUNDING BOX", 1.35);
     draw_text(x, height - 106, "CLICK CORNER, DRAG X/Y/Z", 1.25);
     draw_text(x, height - 86, "LEFT ORBIT  RIGHT PAN  WHEEL ZOOM", 1.05);
@@ -858,6 +916,21 @@ class CalibrationApp {
     }
   }
 
+  void draw_track_labels() {
+    for (const auto& track : track_states_) {
+      const auto screen = project({track.centroid_m.x, track.centroid_m.y,
+                                   top_down_ ? 0.1 : track.centroid_m.z + track.bounds_m.z * 0.55});
+      if (!screen) continue;
+      if (track.classification == "likely_human") glColor3f(0.15F, 1.0F, 0.8F);
+      else if (track.classification == "likely_animal") glColor3f(0.9F, 0.55F, 1.0F);
+      else if (track.classification == "likely_object") glColor3f(1.0F, 0.75F, 0.2F);
+      else glColor3f(0.8F, 0.82F, 0.86F);
+      draw_text(screen->x + 8, screen->y - 8,
+                track.id + " " + track.classification + " " + track.posture,
+                1.15);
+    }
+  }
+
   static std::string short_number(double value) {
     std::ostringstream out; out.setf(std::ios::fixed); out.precision(2); out << value; return out.str();
   }
@@ -888,12 +961,14 @@ class CalibrationApp {
   std::vector<Vec3> room_points_;
   std::vector<specter::Point3> foreground_points_;
   std::vector<specter::ZoneState> zone_states_;
+  std::vector<specter::TrackState> track_states_;
   std::vector<specter::AppConfig> undo_, redo_;
   specter::AppConfig edit_before_;
   std::string status_{"STARTING"};
   std::string rename_buffer_;
   bool frozen_{}, top_down_{}, left_down_{}, right_down_{}, translating_{}, corner_click_{}, renaming_{}, save_preview_{};
   bool live_validation_{};
+  bool object_tracking_{};
   int selected_{-1}, selected_vertex_{-1};
   bool selected_top_{};
   GizmoAxis gizmo_drag_{GizmoAxis::none};
