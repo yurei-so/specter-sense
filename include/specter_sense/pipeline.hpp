@@ -10,7 +10,10 @@
 namespace specter {
 
 Point3 transform_point(const Transform& transform, const Point3& point);
+Transform invert_transform(const Transform& transform);
 Point3 deproject_depth(const Intrinsics& intrinsics, double pixel_x, double pixel_y, double depth_m);
+std::optional<Point2> project_room_to_depth(
+    const Transform& camera_to_room, const Intrinsics& intrinsics, const Point3& room_point);
 bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon);
 std::optional<double> ray_ignore_plane_intersection(
     const IgnorePlaneConfig& plane, const Point3& origin, const Point3& direction);

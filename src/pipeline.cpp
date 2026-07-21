@@ -169,6 +169,33 @@ Point3 transform_point(const Transform& transform, const Point3& point) {
       m[8] * point.x + m[9] * point.y + m[10] * point.z + m[11]};
 }
 
+Transform invert_transform(const Transform& transform) {
+  const auto& m = transform.matrix;
+  const double determinant =
+      m[0] * (m[5] * m[10] - m[6] * m[9]) -
+      m[1] * (m[4] * m[10] - m[6] * m[8]) +
+      m[2] * (m[4] * m[9] - m[5] * m[8]);
+  if (!std::isfinite(determinant) || std::abs(determinant) < 1e-12)
+    throw std::runtime_error("cannot invert singular camera transform");
+  const double inverse = 1.0 / determinant;
+  Transform result;
+  auto& r = result.matrix;
+  r[0] = (m[5] * m[10] - m[6] * m[9]) * inverse;
+  r[1] = (m[2] * m[9] - m[1] * m[10]) * inverse;
+  r[2] = (m[1] * m[6] - m[2] * m[5]) * inverse;
+  r[4] = (m[6] * m[8] - m[4] * m[10]) * inverse;
+  r[5] = (m[0] * m[10] - m[2] * m[8]) * inverse;
+  r[6] = (m[2] * m[4] - m[0] * m[6]) * inverse;
+  r[8] = (m[4] * m[9] - m[5] * m[8]) * inverse;
+  r[9] = (m[1] * m[8] - m[0] * m[9]) * inverse;
+  r[10] = (m[0] * m[5] - m[1] * m[4]) * inverse;
+  r[3] = -(r[0] * m[3] + r[1] * m[7] + r[2] * m[11]);
+  r[7] = -(r[4] * m[3] + r[5] * m[7] + r[6] * m[11]);
+  r[11] = -(r[8] * m[3] + r[9] * m[7] + r[10] * m[11]);
+  r[12] = 0; r[13] = 0; r[14] = 0; r[15] = 1;
+  return result;
+}
+
 Point3 deproject_depth(const Intrinsics& intrinsics, double pixel_x, double pixel_y, double depth_m) {
   if (!(intrinsics.fx > 0 && intrinsics.fy > 0) || !(depth_m > 0) || !std::isfinite(depth_m))
     throw std::runtime_error("cannot deproject invalid depth or intrinsics");
@@ -176,6 +203,15 @@ Point3 deproject_depth(const Intrinsics& intrinsics, double pixel_x, double pixe
       (pixel_x - intrinsics.cx) * depth_m / intrinsics.fx,
       (pixel_y - intrinsics.cy) * depth_m / intrinsics.fy,
       depth_m};
+}
+
+std::optional<Point2> project_room_to_depth(
+    const Transform& camera_to_room, const Intrinsics& intrinsics, const Point3& room_point) {
+  if (!(intrinsics.fx > 0 && intrinsics.fy > 0)) throw std::runtime_error("invalid depth intrinsics");
+  const Point3 camera = transform_point(invert_transform(camera_to_room), room_point);
+  if (!(camera.z > 0) || !std::isfinite(camera.z)) return std::nullopt;
+  return Point2{intrinsics.fx * camera.x / camera.z + intrinsics.cx,
+                intrinsics.fy * camera.y / camera.z + intrinsics.cy};
 }
 
 bool point_in_polygon(const Point2& point, const std::vector<Point2>& polygon) {
@@ -267,23 +303,43 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
   last_ignored_points_.clear();
   last_ignore_plane_states_.clear();
   for (const auto& plane : config_.ignore_planes)
-    last_ignore_plane_states_.push_back({plane.name, plane.enabled, 0});
+    last_ignore_plane_states_.push_back(
+        {plane.name, plane.enabled, 0, 0, plane.noise_threshold_points});
   const auto& p = config_.processing;
+
+  std::vector<std::size_t> plane_matches(config_.ignore_planes.size());
+  if (std::any_of(config_.ignore_planes.begin(), config_.ignore_planes.end(),
+                  [](const auto& plane) { return plane.noise_threshold_points.has_value(); }))
+    for (std::size_t index = 0; index < frame.depth_mm.size(); ++index) {
+      const double depth_m = static_cast<double>(frame.depth_mm[index]) / 1000.0;
+      if (!std::isfinite(depth_m) || depth_m < p.min_depth_m || depth_m > p.max_depth_m) continue;
+      const auto& ignore = ignore_rays_[index];
+      if (ignore.plane_index < config_.ignore_planes.size() &&
+          depth_m >= ignore.depth_m - config_.ignore_planes[ignore.plane_index].surface_tolerance_m)
+        ++plane_matches[ignore.plane_index];
+    }
 
   for (std::size_t index = 0; index < frame.depth_mm.size(); ++index) {
     const double depth_m = static_cast<double>(frame.depth_mm[index]) / 1000.0;
     if (!std::isfinite(depth_m) || depth_m < p.min_depth_m || depth_m > p.max_depth_m) continue;
     const auto& ignore = ignore_rays_[index];
-    if (ignore.plane_index < config_.ignore_planes.size() &&
-        depth_m >= ignore.depth_m - config_.ignore_planes[ignore.plane_index].surface_tolerance_m) {
-      ++last_ignore_plane_states_[ignore.plane_index].rejected_points;
-      if (retain_foreground_points_) {
-        const double u = static_cast<double>(index % frame.width);
-        const double v = static_cast<double>(index / frame.width);
-        last_ignored_points_.push_back(transform_point(
-            config_.camera_to_room, deproject_depth(frame.intrinsics, u, v, depth_m)));
+    if (ignore.plane_index < config_.ignore_planes.size()) {
+      const auto& plane = config_.ignore_planes[ignore.plane_index];
+      const bool reject_plane = !plane.noise_threshold_points ||
+                                plane_matches[ignore.plane_index] <= *plane.noise_threshold_points;
+      if (depth_m >= ignore.depth_m - plane.surface_tolerance_m) {
+        ++last_ignore_plane_states_[ignore.plane_index].matched_points;
+        if (reject_plane) {
+          ++last_ignore_plane_states_[ignore.plane_index].rejected_points;
+          if (retain_foreground_points_) {
+            const double u = static_cast<double>(index % frame.width);
+            const double v = static_cast<double>(index / frame.width);
+            last_ignored_points_.push_back(transform_point(
+                config_.camera_to_room, deproject_depth(frame.intrinsics, u, v, depth_m)));
+          }
+          continue;
+        }
       }
-      continue;
     }
     auto& background = background_m_[index];
     if (!std::isfinite(background)) {

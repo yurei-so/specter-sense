@@ -82,8 +82,14 @@ boost::json::value snapshot_to_json(const Snapshot& snapshot) {
   }
   root["tracks"] = std::move(tracks);
   boost::json::object ignore_planes;
-  for (const auto& plane : snapshot.ignore_planes)
-    ignore_planes[plane.name] = {{"enabled", plane.enabled}, {"rejected_points", plane.rejected_points}};
+  for (const auto& plane : snapshot.ignore_planes) {
+    boost::json::object state{{"enabled", plane.enabled},
+                              {"matched_points", plane.matched_points},
+                              {"rejected_points", plane.rejected_points}};
+    state["noise_threshold_points"] = plane.noise_threshold_points
+        ? boost::json::value(*plane.noise_threshold_points) : boost::json::value(nullptr);
+    ignore_planes[plane.name] = std::move(state);
+  }
   root["ignore_planes"] = std::move(ignore_planes);
   return root;
 }

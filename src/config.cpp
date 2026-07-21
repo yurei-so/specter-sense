@@ -113,6 +113,8 @@ AppConfig load_config(const std::filesystem::path& path) {
       plane.margin_m = number(object, "margin_m");
       plane.surface_tolerance_m = object.if_contains("surface_tolerance_m")
           ? number(object, "surface_tolerance_m") : 0.03;
+      if (const auto* threshold = object.if_contains("noise_threshold_points"))
+        plane.noise_threshold_points = threshold->to_number<std::size_t>();
       const auto& corners = object.at("corners_m").as_array();
       if (corners.size() != 4) throw std::runtime_error("ignore plane " + plane.name + " must contain 4 corners");
       for (std::size_t i = 0; i < 4; ++i) plane.corners_m[i] = point3(corners[i]);
@@ -178,6 +180,8 @@ void validate_config(const AppConfig& config) {
     if (!(plane.surface_tolerance_m >= 0 && plane.surface_tolerance_m <= 0.2) ||
         !std::isfinite(plane.surface_tolerance_m))
       throw std::runtime_error("ignore plane " + plane.name + " surface_tolerance_m must be between 0 and 0.2");
+    if (plane.noise_threshold_points && *plane.noise_threshold_points > 1000000)
+      throw std::runtime_error("ignore plane " + plane.name + " noise_threshold_points must not exceed 1000000");
     for (const auto& corner : plane.corners_m)
       if (!std::isfinite(corner.x) || !std::isfinite(corner.y) || !std::isfinite(corner.z) ||
           std::abs(corner.x) > 50 || std::abs(corner.y) > 50 || std::abs(corner.z) > 20)
@@ -259,12 +263,15 @@ std::string serialize_config(const AppConfig& config) {
     boost::json::array corners;
     for (const auto& corner : plane.corners_m)
       corners.push_back({{"x", corner.x}, {"y", corner.y}, {"z", corner.z}});
-    ignore_planes.push_back({
+    boost::json::object serialized{
         {"name", plane.name},
         {"enabled", plane.enabled},
         {"corners_m", std::move(corners)},
         {"margin_m", plane.margin_m},
-        {"surface_tolerance_m", plane.surface_tolerance_m}});
+        {"surface_tolerance_m", plane.surface_tolerance_m}};
+    if (plane.noise_threshold_points)
+      serialized["noise_threshold_points"] = *plane.noise_threshold_points;
+    ignore_planes.push_back(std::move(serialized));
   }
   boost::json::array zones;
   for (const auto& zone : config.zones) {

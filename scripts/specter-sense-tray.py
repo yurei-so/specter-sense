@@ -131,6 +131,16 @@ class Tray:
                         if status == "streaming":
                             state = "occupied" if occupied else "clear"
                             detail = "Occupied: " + ", ".join(occupied) if occupied else "Streaming; all zones clear"
+                            plane_activity = []
+                            for name, plane in snapshot.get("ignore_planes", {}).items():
+                                threshold = plane.get("noise_threshold_points")
+                                if threshold is None or not plane.get("enabled", False):
+                                    continue
+                                matched = int(plane.get("matched_points", 0))
+                                disposition = "passing" if matched > threshold else "suppressed"
+                                plane_activity.append(f"{name} {matched}/{threshold} {disposition}")
+                            if plane_activity:
+                                detail += "; planes: " + ", ".join(plane_activity)
                         else:
                             state, detail = "warning", f"Sensor {status.replace('_', ' ')}"
                         self.bridge.changed.emit(state, detail)

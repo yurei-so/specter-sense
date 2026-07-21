@@ -105,6 +105,7 @@ struct Options {
   std::filesystem::path config{"config/specter-sense.example.json"};
   std::string source{"kinect"};
   bool object_tracking{};
+  bool camera_view{};
 };
 
 Options parse_options(int argc, char** argv) {
@@ -122,9 +123,10 @@ Options parse_options(int argc, char** argv) {
     if (arg == "--config") options.config = value();
     else if (arg == "--source") options.source = value();
     else if (arg == "--object-tracking") options.object_tracking = true;
+    else if (arg == "--camera-view") options.camera_view = true;
     else if (arg == "--help") {
       std::cout << "Usage: specter-sense-calibrate [--config PATH] [--source kinect|synthetic] "
-                   "[--object-tracking]\n";
+                   "[--object-tracking] [--camera-view]\n";
       std::exit(0);
     } else throw std::runtime_error("unknown argument: " + arg);
   }
@@ -138,6 +140,7 @@ class CalibrationApp {
         original_(config_), pipeline_(std::make_unique<specter::OccupancyPipeline>(config_, true)),
         object_tracking_(options_.object_tracking) {
     pipeline_->set_tracking_enabled(object_tracking_);
+    if (options_.camera_view) view_mode_ = ViewMode::camera;
   }
 
   int run() {
@@ -171,6 +174,10 @@ class CalibrationApp {
 
  private:
   enum class GizmoAxis { none, x, y, z };
+  enum class ViewMode { perspective, top_down, camera };
+
+  bool top_down() const { return view_mode_ == ViewMode::top_down; }
+  bool camera_view() const { return view_mode_ == ViewMode::camera; }
 
   static CalibrationApp& self(GLFWwindow* window) {
     return *static_cast<CalibrationApp*>(glfwGetWindowUserPointer(window));
@@ -369,6 +376,37 @@ class CalibrationApp {
   }
 
   struct CameraFrame { Vec3 eye, forward, right, up; };
+  struct ScreenViewport { double x{}, y{}, width{}, height{}; };
+
+  ScreenViewport camera_screen_viewport(int width, int height) const {
+    const double available_width = std::max(1, width - panel_width);
+    if (!frame_ || frame_->width == 0 || frame_->height == 0)
+      return {0, 0, available_width, static_cast<double>(height)};
+    const double source_aspect = static_cast<double>(frame_->width) / static_cast<double>(frame_->height);
+    const double available_aspect = available_width / std::max(1.0, static_cast<double>(height));
+    if (available_aspect > source_aspect) {
+      const double fitted_width = height * source_aspect;
+      return {(available_width - fitted_width) * 0.5, 0, fitted_width, static_cast<double>(height)};
+    }
+    const double fitted_height = available_width / source_aspect;
+    return {0, (height - fitted_height) * 0.5, available_width, fitted_height};
+  }
+
+  std::optional<specter::Point2> screen_to_depth_pixel(double x, double y) const {
+    if (!frame_) return std::nullopt;
+    int width, height;
+    glfwGetWindowSize(window_, &width, &height);
+    const auto viewport = camera_screen_viewport(width, height);
+    if (x < viewport.x || x > viewport.x + viewport.width ||
+        y < viewport.y || y > viewport.y + viewport.height) return std::nullopt;
+    const double displayed_x = (viewport.x + viewport.width - x) / viewport.width *
+                               static_cast<double>(frame_->width);
+    const double displayed_y = (y - viewport.y) / viewport.height *
+                               static_cast<double>(frame_->height);
+    return specter::Point2{
+        frame_->intrinsics.cx + (displayed_x - frame_->intrinsics.cx) / camera_zoom_,
+        frame_->intrinsics.cy + (displayed_y - frame_->intrinsics.cy) / camera_zoom_};
+  }
 
   CameraFrame camera_frame() const {
     const Vec3 target{target_x_, target_y_, target_z_};
@@ -386,7 +424,22 @@ class CalibrationApp {
     int width, height;
     glfwGetWindowSize(window_, &width, &height);
     const int viewport_width = std::max(1, width - panel_width);
-    if (top_down_) {
+    if (camera_view()) {
+      if (!frame_) return std::nullopt;
+      const auto pixel = specter::project_room_to_depth(
+          config_.camera_to_room, frame_->intrinsics, {point.x, point.y, point.z});
+      if (!pixel) return std::nullopt;
+      const auto viewport = camera_screen_viewport(width, height);
+      const double displayed_x = frame_->intrinsics.cx +
+          (pixel->x - frame_->intrinsics.cx) * camera_zoom_;
+      const double displayed_y = frame_->intrinsics.cy +
+          (pixel->y - frame_->intrinsics.cy) * camera_zoom_;
+      return specter::Point2{
+          viewport.x + viewport.width -
+              displayed_x / static_cast<double>(frame_->width) * viewport.width,
+          viewport.y + displayed_y / static_cast<double>(frame_->height) * viewport.height};
+    }
+    if (top_down()) {
       const double aspect = static_cast<double>(viewport_width) / std::max(1, height);
       return specter::Point2{
           viewport_width - ((point.x - pan_x_) / (top_scale_ * aspect) + 1.0) * 0.5 * viewport_width,
@@ -427,7 +480,7 @@ class CalibrationApp {
       const auto& zone = config_.zones[z];
       for (std::size_t v = 0; v < zone.floor_polygon.size(); ++v) {
         for (const bool is_top : {false, true}) {
-          if (top_down_ && is_top) continue;
+          if (top_down() && is_top) continue;
           const auto& floor = zone.floor_polygon[v];
           const auto screen = project({floor.x, floor.y, is_top ? zone.max_height_m : zone.min_height_m});
           if (!screen) continue;
@@ -476,6 +529,16 @@ class CalibrationApp {
     return true;
   }
 
+  bool pick_camera(double x, double y) {
+    if (camera_view()) return false;
+    const auto origin = specter::transform_point(config_.camera_to_room, {0, 0, 0});
+    const auto screen = project({origin.x, origin.y, origin.z});
+    if (!screen || std::hypot(screen->x - x, screen->y - y) >= 18.0) return false;
+    view_mode_ = ViewMode::camera;
+    status_ = frame_ ? "EXACT KINECT DEPTH VIEW" : "CAMERA VIEW WAITING FOR DEPTH INTRINSICS";
+    return true;
+  }
+
   static double distance_to_segment(double px, double py, specter::Point2 a, specter::Point2 b) {
     const double dx = b.x - a.x, dy = b.y - a.y;
     const double length_squared = dx * dx + dy * dy;
@@ -495,7 +558,7 @@ class CalibrationApp {
     GizmoAxis best_axis = GizmoAxis::none;
     double best = 9.0;
     for (const auto& [axis, delta] : axes) {
-      if (top_down_ && axis == GizmoAxis::z) continue;
+      if (top_down() && axis == GizmoAxis::z) continue;
       const auto end = project(origin + delta);
       if (!end) continue;
       const double distance = distance_to_segment(x, y, *start, *end);
@@ -516,6 +579,12 @@ class CalibrationApp {
       }
       return;
     }
+    const auto& selected_point = plane.corners_m[static_cast<std::size_t>(selected_plane_corner_)];
+    resize_selected_plane_to({selected_point.x + delta.x, selected_point.y + delta.y, selected_point.z + delta.z});
+  }
+
+  void resize_selected_plane_to(Vec3 candidate) {
+    auto& plane = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
     const auto original = plane.corners_m;
     const Vec3 u = normalized(Vec3{original[1].x - original[0].x, original[1].y - original[0].y,
                                    original[1].z - original[0].z});
@@ -523,9 +592,7 @@ class CalibrationApp {
                                    original[3].z - original[0].z});
     const std::size_t selected = static_cast<std::size_t>(selected_plane_corner_);
     const std::size_t opposite = (selected + 2) % 4;
-    const Vec3 selected_point{original[selected].x, original[selected].y, original[selected].z};
     const Vec3 opposite_point{original[opposite].x, original[opposite].y, original[opposite].z};
-    const Vec3 candidate = selected_point + delta;
     const Vec3 diagonal = candidate - opposite_point;
     const double width = std::max(0.05, std::abs(dot(diagonal, u)));
     const double height = std::max(0.05, std::abs(dot(diagonal, v)));
@@ -577,7 +644,7 @@ class CalibrationApp {
       return;
     }
     if (right_down_) {
-      if (top_down_) {
+      if (top_down()) {
         const auto current = screen_to_floor(x, y);
         const auto previous = screen_to_floor(x - dx, y - dy);
         pan_x_ -= current.x - previous.x; pan_y_ -= current.y - previous.y;
@@ -591,15 +658,38 @@ class CalibrationApp {
       return;
     }
     if (!left_down_) return;
-    if (corner_click_) return;
-    if (top_down_ && translating_ && selected_ >= 0) {
+    if (corner_click_) {
+      if (camera_view() && selected_plane_ >= 0 && selected_plane_corner_ >= 0 && frame_) {
+        const auto pixel = screen_to_depth_pixel(x, y);
+        if (pixel) {
+          const auto camera_ray = specter::deproject_depth(frame_->intrinsics, pixel->x, pixel->y, 1.0);
+          const auto origin_point = specter::transform_point(config_.camera_to_room, {0, 0, 0});
+          const auto ray_point = specter::transform_point(config_.camera_to_room, camera_ray);
+          specter::IgnorePlaneConfig geometric = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
+          geometric.enabled = true;
+          geometric.margin_m = 50;
+          const specter::Point3 origin{origin_point.x, origin_point.y, origin_point.z};
+          const specter::Point3 direction{ray_point.x - origin.x, ray_point.y - origin.y, ray_point.z - origin.z};
+          const auto hit = specter::ray_ignore_plane_intersection(geometric, origin, direction);
+          if (hit) {
+            resize_selected_plane_to({origin.x + direction.x * *hit,
+                                      origin.y + direction.y * *hit,
+                                      origin.z + direction.z * *hit});
+            plane_corner_dragged_ = true;
+            refresh_ignore_planes();
+          }
+        }
+      }
+      return;
+    }
+    if (top_down() && translating_ && selected_ >= 0) {
       const auto current = screen_to_floor(x, y);
       const auto previous = screen_to_floor(x - dx, y - dy);
       for (auto& point : config_.zones[static_cast<std::size_t>(selected_)].floor_polygon) {
         point.x += current.x - previous.x; point.y += current.y - previous.y;
       }
       rebuild_pipeline();
-    } else if (!top_down_) {
+    } else if (!top_down() && !camera_view()) {
       orbit_yaw_ += dx * 0.006;
       orbit_pitch_ = std::clamp(orbit_pitch_ + dy * 0.006, -1.45, 1.45);
     }
@@ -617,20 +707,24 @@ class CalibrationApp {
     if (button != GLFW_MOUSE_BUTTON_LEFT) return;
     left_down_ = action == GLFW_PRESS;
     if (action == GLFW_RELEASE) {
-      if (gizmo_drag_ != GizmoAxis::none || translating_) {
+      if (gizmo_drag_ != GizmoAxis::none || translating_ || plane_corner_dragged_) {
         if (editing_plane_) remember_ignore_planes(edit_before_); else remember(edit_before_);
       }
       gizmo_drag_ = GizmoAxis::none; translating_ = false; corner_click_ = false;
-      editing_plane_ = false;
+      editing_plane_ = false; plane_corner_dragged_ = false;
       return;
     }
     const auto axis = pick_gizmo(mouse_x_, mouse_y_);
     if (axis != GizmoAxis::none) {
       edit_before_ = config_; gizmo_drag_ = axis; editing_plane_ = selected_plane_ >= 0; return;
     }
-    if (pick_ignore_plane(mouse_x_, mouse_y_)) { corner_click_ = true; return; }
+    if (pick_camera(mouse_x_, mouse_y_)) return;
+    const auto before_pick = config_;
+    if (pick_ignore_plane(mouse_x_, mouse_y_)) {
+      edit_before_ = before_pick; editing_plane_ = true; corner_click_ = true; return;
+    }
     if (pick_corner(mouse_x_, mouse_y_)) { corner_click_ = true; return; }
-    if (!top_down_) return;
+    if (!top_down()) return;
     const auto point = screen_to_floor(mouse_x_, mouse_y_);
     edit_before_ = config_;
     if (selected_ >= 0 && specter::point_in_polygon(point, config_.zones[static_cast<std::size_t>(selected_)].floor_polygon)) {
@@ -643,7 +737,8 @@ class CalibrationApp {
   }
 
   void on_scroll(double amount) {
-    if (top_down_) top_scale_ = std::clamp(top_scale_ * std::pow(0.88, amount), 0.5, 20.0);
+    if (top_down()) top_scale_ = std::clamp(top_scale_ * std::pow(0.88, amount), 0.5, 20.0);
+    else if (camera_view()) camera_zoom_ = std::clamp(camera_zoom_ * std::pow(1.15, amount), 0.25, 4.0);
     else orbit_distance_ = std::clamp(orbit_distance_ * std::pow(0.88, amount), 0.5, 20.0);
   }
 
@@ -741,6 +836,16 @@ class CalibrationApp {
     remember_ignore_planes(before);
   }
 
+  void change_ignore_noise_threshold(int delta) {
+    if (selected_plane_ < 0) return;
+    const auto before = config_;
+    auto& threshold = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)].noise_threshold_points;
+    if (delta > 0) threshold = std::min<std::size_t>(1000000, threshold.value_or(0) + 10);
+    else if (threshold && *threshold > 10) threshold = *threshold - 10;
+    else threshold.reset();
+    remember_ignore_planes(before);
+  }
+
   void confirm_save() {
     try {
       specter::save_config_atomic(options_.config, config_);
@@ -769,8 +874,12 @@ class CalibrationApp {
       else if (inside(x, y, left + 145, 316, 135, 30)) renaming_ = false;
       return;
     }
-    if (inside(x, y, left, 88, 142, 30)) top_down_ = false;
-    else if (inside(x, y, left + 152, 88, 142, 30)) top_down_ = true;
+    if (inside(x, y, left, 88, 94, 30)) view_mode_ = ViewMode::perspective;
+    else if (inside(x, y, left + 100, 88, 94, 30)) view_mode_ = ViewMode::top_down;
+    else if (inside(x, y, left + 200, 88, 94, 30)) {
+      view_mode_ = ViewMode::camera;
+      status_ = frame_ ? "EXACT KINECT DEPTH VIEW" : "CAMERA VIEW WAITING FOR DEPTH INTRINSICS";
+    }
     else if (inside(x, y, left, 126, 142, 30)) { frozen_ = !frozen_; status_ = frozen_ ? "DEPTH FRAME FROZEN" : "LIVE DEPTH"; }
     else if (inside(x, y, left + 152, 126, 142, 30)) estimate_floor();
     else if (inside(x, y, left, 164, 142, 30)) live_validation_ = !live_validation_;
@@ -796,21 +905,23 @@ class CalibrationApp {
                                               config_.zones[static_cast<std::size_t>(selected_)].name;
     } else if (inside(x, y, left + 226, 202, 68, 30) && (selected_ >= 0 || selected_plane_ >= 0)) duplicate_selected();
     else if (inside(x, y, left, 238, 294, 30) && (selected_ >= 0 || selected_plane_ >= 0)) delete_selected();
-    else if (selected_plane_ >= 0 && inside(x, y, left, 388, 34, 26)) change_ignore_margin(-0.01);
-    else if (selected_plane_ >= 0 && inside(x, y, left + 260, 388, 34, 26)) change_ignore_margin(0.01);
-    else if (selected_plane_ >= 0 && inside(x, y, left, 426, 34, 26)) rotate_selected_plane({0, 0, 1}, -5 * pi / 180);
-    else if (selected_plane_ >= 0 && inside(x, y, left + 260, 426, 34, 26)) rotate_selected_plane({0, 0, 1}, 5 * pi / 180);
-    else if (selected_plane_ >= 0 && inside(x, y, left, 464, 34, 26)) {
+    else if (selected_plane_ >= 0 && inside(x, y, left, 388, 34, 26)) change_ignore_noise_threshold(-10);
+    else if (selected_plane_ >= 0 && inside(x, y, left + 260, 388, 34, 26)) change_ignore_noise_threshold(10);
+    else if (selected_plane_ >= 0 && inside(x, y, left, 426, 34, 26)) change_ignore_margin(-0.01);
+    else if (selected_plane_ >= 0 && inside(x, y, left + 260, 426, 34, 26)) change_ignore_margin(0.01);
+    else if (selected_plane_ >= 0 && inside(x, y, left, 464, 34, 26)) rotate_selected_plane({0, 0, 1}, -5 * pi / 180);
+    else if (selected_plane_ >= 0 && inside(x, y, left + 260, 464, 34, 26)) rotate_selected_plane({0, 0, 1}, 5 * pi / 180);
+    else if (selected_plane_ >= 0 && inside(x, y, left, 502, 34, 26)) {
       const auto& p = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
       rotate_selected_plane(normalized(Vec3{p.corners_m[1].x - p.corners_m[0].x,
                                             p.corners_m[1].y - p.corners_m[0].y,
                                             p.corners_m[1].z - p.corners_m[0].z}), -5 * pi / 180);
-    } else if (selected_plane_ >= 0 && inside(x, y, left + 260, 464, 34, 26)) {
+    } else if (selected_plane_ >= 0 && inside(x, y, left + 260, 502, 34, 26)) {
       const auto& p = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)];
       rotate_selected_plane(normalized(Vec3{p.corners_m[1].x - p.corners_m[0].x,
                                             p.corners_m[1].y - p.corners_m[0].y,
                                             p.corners_m[1].z - p.corners_m[0].z}), 5 * pi / 180);
-    } else if (selected_plane_ >= 0 && inside(x, y, left, 502, 294, 26)) {
+    } else if (selected_plane_ >= 0 && inside(x, y, left, 540, 294, 26)) {
       const auto before = config_;
       auto& enabled = config_.ignore_planes[static_cast<std::size_t>(selected_plane_)].enabled;
       enabled = !enabled;
@@ -901,16 +1012,52 @@ class CalibrationApp {
     glMultMatrixd(view.data());
   }
 
+  void set_camera_view() {
+    if (!frame_) {
+      glOrtho(-1, 1, -1, 1, -10, 10);
+      glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+      return;
+    }
+    const auto& intrinsics = frame_->intrinsics;
+    constexpr double near_plane = 0.05;
+    const double far_plane = std::max(near_plane + 1.0, config_.processing.max_depth_m + 2.0);
+    const double left = -intrinsics.cx * near_plane / intrinsics.fx / camera_zoom_;
+    const double right = (static_cast<double>(frame_->width) - intrinsics.cx) * near_plane /
+                         intrinsics.fx / camera_zoom_;
+    const double top = intrinsics.cy * near_plane / intrinsics.fy / camera_zoom_;
+    const double bottom = -(static_cast<double>(frame_->height) - intrinsics.cy) * near_plane /
+                          intrinsics.fy / camera_zoom_;
+    glFrustum(left, right, bottom, top, near_plane, far_plane);
+    glScaled(-1, 1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    const auto inverse = specter::invert_transform(config_.camera_to_room).matrix;
+    const std::array<double, 16> view{
+        inverse[0], -inverse[4], -inverse[8], 0,
+        inverse[1], -inverse[5], -inverse[9], 0,
+        inverse[2], -inverse[6], -inverse[10], 0,
+        inverse[3], -inverse[7], -inverse[11], 1};
+    glMultMatrixd(view.data());
+  }
+
   void render() {
     int width, height;
     glfwGetFramebufferSize(window_, &width, &height);
     const int viewport_width = std::max(1, width - panel_width);
-    glViewport(0, 0, viewport_width, height);
+    glViewport(0, 0, width, height);
     glClearColor(0.025F, 0.03F, 0.045F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (camera_view()) {
+      const auto viewport = camera_screen_viewport(width, height);
+      glViewport(static_cast<int>(std::lround(viewport.x)),
+                 static_cast<int>(std::lround(height - viewport.y - viewport.height)),
+                 std::max(1, static_cast<int>(std::lround(viewport.width))),
+                 std::max(1, static_cast<int>(std::lround(viewport.height))));
+    } else glViewport(0, 0, viewport_width, height);
     glEnable(GL_DEPTH_TEST);
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
-    if (top_down_) {
+    if (camera_view()) {
+      set_camera_view();
+    } else if (top_down()) {
       const double aspect = static_cast<double>(viewport_width) / std::max(1, height);
       glOrtho(pan_x_ + top_scale_ * aspect, pan_x_ - top_scale_ * aspect,
               pan_y_ - top_scale_, pan_y_ + top_scale_, -10, 10);
@@ -931,6 +1078,7 @@ class CalibrationApp {
       glVertex3d(-10, i, 0); glVertex3d(10, i, 0);
     }
     glEnd();
+    if (!camera_view()) draw_physical_camera();
     glLineWidth(3.0F);
     glBegin(GL_LINES);
     glColor3f(1, 0.2F, 0.2F); glVertex3d(0, 0, 0); glVertex3d(1, 0, 0);
@@ -943,15 +1091,15 @@ class CalibrationApp {
     for (const auto point : room_points_) {
       const float normalized_height = static_cast<float>(std::clamp(point.z / 2.5, 0.0, 1.0));
       glColor3f(0.15F + 0.35F * normalized_height, 0.45F + 0.4F * normalized_height, 0.8F);
-      glVertex3d(point.x, point.y, top_down_ ? 0.01 : point.z);
+      glVertex3d(point.x, point.y, top_down() ? 0.01 : point.z);
     }
     glEnd();
     if (live_validation_) {
       glPointSize(4.0F); glColor3f(1, 0.25F, 0.1F); glBegin(GL_POINTS);
-      for (const auto& point : foreground_points_) glVertex3d(point.x, point.y, top_down_ ? 0.03 : point.z);
+      for (const auto& point : foreground_points_) glVertex3d(point.x, point.y, top_down() ? 0.03 : point.z);
       glEnd();
       glPointSize(3.0F); glColor3f(0.9F, 0.15F, 0.75F); glBegin(GL_POINTS);
-      for (const auto& point : ignored_points_) glVertex3d(point.x, point.y, top_down_ ? 0.04 : point.z);
+      for (const auto& point : ignored_points_) glVertex3d(point.x, point.y, top_down() ? 0.04 : point.z);
       glEnd();
     }
     for (std::size_t i = 0; i < config_.ignore_planes.size(); ++i)
@@ -959,6 +1107,54 @@ class CalibrationApp {
     for (std::size_t i = 0; i < config_.zones.size(); ++i) draw_zone(config_.zones[i], static_cast<int>(i) == selected_);
     if (object_tracking_) draw_tracks();
     draw_gizmo();
+  }
+
+  void draw_physical_camera() {
+    const auto room = [&](Vec3 camera) {
+      const auto point = specter::transform_point(config_.camera_to_room, {camera.x, camera.y, camera.z});
+      return Vec3{point.x, point.y, point.z};
+    };
+    const Vec3 origin = room({0, 0, 0});
+    const std::array<Vec3, 8> body{
+        room({-0.14, -0.045, -0.08}), room({0.14, -0.045, -0.08}),
+        room({0.14, 0.045, -0.08}), room({-0.14, 0.045, -0.08}),
+        room({-0.14, -0.045, 0.02}), room({0.14, -0.045, 0.02}),
+        room({0.14, 0.045, 0.02}), room({-0.14, 0.045, 0.02})};
+    glColor3f(0.82F, 0.86F, 0.92F); glLineWidth(3.0F);
+    glBegin(GL_LINE_LOOP); for (std::size_t i = 0; i < 4; ++i) glVertex3d(body[i].x, body[i].y, body[i].z); glEnd();
+    glBegin(GL_LINE_LOOP); for (std::size_t i = 4; i < 8; ++i) glVertex3d(body[i].x, body[i].y, body[i].z); glEnd();
+    glBegin(GL_LINES);
+    for (std::size_t i = 0; i < 4; ++i) {
+      glVertex3d(body[i].x, body[i].y, body[i].z);
+      glVertex3d(body[i + 4].x, body[i + 4].y, body[i + 4].z);
+    }
+    glEnd();
+    const Vec3 x_axis = room({0.3, 0, 0});
+    const Vec3 y_axis = room({0, 0.3, 0});
+    const Vec3 forward = room({0, 0, 0.5});
+    glBegin(GL_LINES);
+    glColor3f(1, 0.2F, 0.2F); glVertex3d(origin.x, origin.y, origin.z); glVertex3d(x_axis.x, x_axis.y, x_axis.z);
+    glColor3f(0.2F, 1, 0.2F); glVertex3d(origin.x, origin.y, origin.z); glVertex3d(y_axis.x, y_axis.y, y_axis.z);
+    glColor3f(0.2F, 0.55F, 1); glVertex3d(origin.x, origin.y, origin.z); glVertex3d(forward.x, forward.y, forward.z);
+    glEnd();
+    if (!frame_) return;
+    const double depth = std::min(1.25, config_.processing.max_depth_m);
+    const std::array<specter::Point2, 4> pixels{{
+        {0, 0}, {static_cast<double>(frame_->width), 0},
+        {static_cast<double>(frame_->width), static_cast<double>(frame_->height)},
+        {0, static_cast<double>(frame_->height)}}};
+    std::array<Vec3, 4> frustum;
+    for (std::size_t i = 0; i < pixels.size(); ++i) {
+      const auto camera = specter::deproject_depth(frame_->intrinsics, pixels[i].x, pixels[i].y, depth);
+      frustum[i] = room({camera.x, camera.y, camera.z});
+    }
+    glColor4f(0.35F, 0.72F, 1.0F, 0.75F); glLineWidth(1.5F);
+    glBegin(GL_LINES);
+    for (const auto& corner : frustum) {
+      glVertex3d(origin.x, origin.y, origin.z); glVertex3d(corner.x, corner.y, corner.z);
+    }
+    glEnd();
+    glBegin(GL_LINE_LOOP); for (const auto& corner : frustum) glVertex3d(corner.x, corner.y, corner.z); glEnd();
   }
 
   void draw_ignore_plane(const specter::IgnorePlaneConfig& plane, bool selected) {
@@ -975,6 +1171,22 @@ class CalibrationApp {
     glBegin(GL_LINE_LOOP);
     for (const auto& point : plane.corners_m) glVertex3d(point.x, point.y, point.z);
     glEnd();
+    if (camera_view() && plane.margin_m > 0) {
+      const Vec3 u = normalized(Vec3{plane.corners_m[1].x - plane.corners_m[0].x,
+                                     plane.corners_m[1].y - plane.corners_m[0].y,
+                                     plane.corners_m[1].z - plane.corners_m[0].z});
+      const Vec3 v = normalized(Vec3{plane.corners_m[3].x - plane.corners_m[0].x,
+                                     plane.corners_m[3].y - plane.corners_m[0].y,
+                                     plane.corners_m[3].z - plane.corners_m[0].z});
+      const auto as_vec = [](const specter::Point3& point) { return Vec3{point.x, point.y, point.z}; };
+      const std::array<Vec3, 4> expanded{
+          as_vec(plane.corners_m[0]) - u * plane.margin_m - v * plane.margin_m,
+          as_vec(plane.corners_m[1]) + u * plane.margin_m - v * plane.margin_m,
+          as_vec(plane.corners_m[2]) + u * plane.margin_m + v * plane.margin_m,
+          as_vec(plane.corners_m[3]) - u * plane.margin_m + v * plane.margin_m};
+      glColor4f(1.0F, 0.85F, 0.15F, 0.95F); glLineWidth(2.0F);
+      glBegin(GL_LINE_LOOP); for (const auto& point : expanded) glVertex3d(point.x, point.y, point.z); glEnd();
+    }
     if (selected) {
       glDisable(GL_DEPTH_TEST);
       glPointSize(10.0F); glBegin(GL_POINTS);
@@ -1012,7 +1224,7 @@ class CalibrationApp {
       const double min_z = track.centroid_m.z - track.bounds_m.z * 0.5;
       const double max_z = track.centroid_m.z + track.bounds_m.z * 0.5;
       glLineWidth(track.occluded ? 1.5F : 3.0F);
-      if (top_down_) {
+      if (top_down()) {
         glBegin(GL_LINE_LOOP);
         glVertex3d(min_x, min_y, 0.09); glVertex3d(max_x, min_y, 0.09);
         glVertex3d(max_x, max_y, 0.09); glVertex3d(min_x, max_y, 0.09);
@@ -1040,7 +1252,7 @@ class CalibrationApp {
     const auto& polygon = zone.floor_polygon;
     const float r = selected ? 1.0F : 0.15F, g = selected ? 0.55F : 0.75F, b = selected ? 0.1F : 0.95F;
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    if (!top_down_) {
+    if (!top_down()) {
       glColor4f(r, g, b, 0.12F); glBegin(GL_QUADS);
       for (std::size_t i = 0; i < polygon.size(); ++i) {
         const auto& a = polygon[i]; const auto& c = polygon[(i + 1) % polygon.size()];
@@ -1050,17 +1262,17 @@ class CalibrationApp {
       glEnd();
     }
     glColor4f(r, g, b, 0.95F); glLineWidth(selected ? 4.0F : 2.0F);
-    const double low = top_down_ ? 0.05 : zone.min_height_m;
-    const double high = top_down_ ? 0.05 : zone.max_height_m;
+    const double low = top_down() ? 0.05 : zone.min_height_m;
+    const double high = top_down() ? 0.05 : zone.max_height_m;
     glBegin(GL_LINE_LOOP); for (const auto point : polygon) glVertex3d(point.x, point.y, low); glEnd();
-    if (!top_down_) {
+    if (!top_down()) {
       glBegin(GL_LINE_LOOP); for (const auto point : polygon) glVertex3d(point.x, point.y, high); glEnd();
       glBegin(GL_LINES); for (const auto point : polygon) { glVertex3d(point.x, point.y, low); glVertex3d(point.x, point.y, high); } glEnd();
     }
     glDisable(GL_DEPTH_TEST);
-    if (top_down_ && selected) {
+    if (top_down() && selected) {
       glPointSize(9); glBegin(GL_POINTS); for (const auto point : polygon) glVertex3d(point.x, point.y, 0.08); glEnd();
-    } else if (!top_down_) {
+    } else if (!top_down()) {
       glPointSize(selected ? 9.0F : 6.0F); glBegin(GL_POINTS);
       for (const auto point : polygon) {
         glVertex3d(point.x, point.y, zone.min_height_m);
@@ -1082,7 +1294,7 @@ class CalibrationApp {
     glVertex3d(origin.x, origin.y, origin.z); glVertex3d(origin.x + 0.45, origin.y, origin.z);
     glColor3f(0.12F, gizmo_drag_ == GizmoAxis::y ? 1.0F : 0.85F, 0.15F);
     glVertex3d(origin.x, origin.y, origin.z); glVertex3d(origin.x, origin.y + 0.45, origin.z);
-    if (!top_down_) {
+    if (!top_down()) {
       glColor3f(0.12F, 0.4F, gizmo_drag_ == GizmoAxis::z ? 1.0F : 0.95F);
       glVertex3d(origin.x, origin.y, origin.z); glVertex3d(origin.x, origin.y, origin.z + 0.45);
     }
@@ -1090,7 +1302,7 @@ class CalibrationApp {
     glPointSize(11.0F); glBegin(GL_POINTS);
     glColor3f(1, 0.15F, 0.15F); glVertex3d(origin.x + 0.45, origin.y, origin.z);
     glColor3f(0.15F, 1, 0.2F); glVertex3d(origin.x, origin.y + 0.45, origin.z);
-    if (!top_down_) { glColor3f(0.15F, 0.45F, 1); glVertex3d(origin.x, origin.y, origin.z + 0.45); }
+    if (!top_down()) { glColor3f(0.15F, 0.45F, 1); glVertex3d(origin.x, origin.y, origin.z + 0.45); }
     glEnd();
     glEnable(GL_DEPTH_TEST);
   }
@@ -1100,7 +1312,21 @@ class CalibrationApp {
     glDisable(GL_DEPTH_TEST);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, width, height, 0, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-    if (top_down_) draw_topdown_labels(width, height);
+    if (camera_view()) {
+      const auto viewport = camera_screen_viewport(width, height);
+      glColor3f(0.25F, 0.8F, 1.0F);
+      glLineWidth(2.0F);
+      glBegin(GL_LINE_LOOP);
+      glVertex2d(viewport.x + 1, viewport.y + 1);
+      glVertex2d(viewport.x + viewport.width - 1, viewport.y + 1);
+      glVertex2d(viewport.x + viewport.width - 1, viewport.y + viewport.height - 1);
+      glVertex2d(viewport.x + 1, viewport.y + viewport.height - 1);
+      glEnd();
+      draw_text(viewport.x + 10, viewport.y + 10,
+                "MIRRORED SENSOR FOV  " + short_number(camera_zoom_) + "X", 1.05);
+    }
+    if (top_down()) draw_topdown_labels(width, height);
+    if (!camera_view()) draw_camera_label();
     draw_ignore_plane_labels();
     if (object_tracking_) draw_track_labels();
     glColor4f(0.055F, 0.065F, 0.085F, 0.98F);
@@ -1108,8 +1334,9 @@ class CalibrationApp {
     const double x = width - panel_width + 16;
     glColor3f(0.75F, 0.9F, 1.0F); draw_text(x, 16, "SPECTER-SENSE", 2.2);
     glColor3f(0.8F, 0.82F, 0.86F); draw_text(x, 48, status_.substr(0, 42), 1.15);
-    draw_button(x, 88, 142, 30, "PERSPECTIVE", !top_down_);
-    draw_button(x + 152, 88, 142, 30, "TOP-DOWN", top_down_);
+    draw_button(x, 88, 94, 30, "3D", view_mode_ == ViewMode::perspective);
+    draw_button(x + 100, 88, 94, 30, "TOP", view_mode_ == ViewMode::top_down);
+    draw_button(x + 200, 88, 94, 30, "CAMERA", view_mode_ == ViewMode::camera);
     draw_button(x, 126, 142, 30, frozen_ ? "RESUME LIVE" : "FREEZE FRAME", frozen_);
     draw_button(x + 152, 126, 142, 30, "ESTIMATE FLOOR", false);
     draw_button(x, 164, 142, 30, live_validation_ ? "VALIDATION ON" : "VALIDATION OFF", live_validation_);
@@ -1132,12 +1359,22 @@ class CalibrationApp {
       glColor3f(0.78F, 0.82F, 0.86F);
       draw_text(x, y, std::string("STATE: ") + (plane.enabled ? "ENABLED" : "DISABLED"), 1.2); y += 20;
       if (static_cast<std::size_t>(selected_plane_) < ignore_plane_states_.size()) {
-        draw_text(x, y, "REJECTED: " + std::to_string(ignore_plane_states_[static_cast<std::size_t>(selected_plane_)].rejected_points) + " PTS", 1.2); y += 20;
+        const auto& state = ignore_plane_states_[static_cast<std::size_t>(selected_plane_)];
+        draw_text(x, y, "MATCHED: " + std::to_string(state.matched_points) + " PTS", 1.2); y += 20;
+        draw_text(x, y, "REJECTED: " + std::to_string(state.rejected_points) + " PTS", 1.2); y += 20;
+        if (plane.noise_threshold_points) {
+          const bool passing = state.matched_points > *plane.noise_threshold_points;
+          glColor3f(passing ? 1.0F : 0.35F, passing ? 0.65F : 0.85F, 0.2F);
+          draw_text(x, y, passing ? "SENSITIVITY: ACTIVITY PASSING" : "SENSITIVITY: NOISE SUPPRESSED", 1.05);
+          y += 20;
+        }
       }
-      draw_stepper(x, 388, "MARGIN", short_number(plane.margin_m) + " M");
-      draw_stepper(x, 426, "YAW", "5 DEG");
-      draw_stepper(x, 464, "PITCH", "5 DEG");
-      draw_button(x, 502, 294, 26, plane.enabled ? "DISABLE PLANE" : "ENABLE PLANE", plane.enabled);
+      draw_stepper(x, 388, "NOISE LIMIT", plane.noise_threshold_points
+          ? std::to_string(*plane.noise_threshold_points) + " PTS" : "IGNORE ALL");
+      draw_stepper(x, 426, "MARGIN", short_number(plane.margin_m) + " M");
+      draw_stepper(x, 464, "YAW", "5 DEG");
+      draw_stepper(x, 502, "PITCH", "5 DEG");
+      draw_button(x, 540, 294, 26, plane.enabled ? "DISABLE PLANE" : "ENABLE PLANE", plane.enabled);
     } else if (selected_ >= 0 && selected_ < static_cast<int>(config_.zones.size())) {
       const auto& zone = config_.zones[static_cast<std::size_t>(selected_)];
       glColor3f(1, 0.65F, 0.2F); draw_text(x, y, "ZONE: " + zone.name, 1.6); y += 22;
@@ -1163,7 +1400,8 @@ class CalibrationApp {
                 object_tracking_);
     draw_text(x, height - 128, "CTRL+N BOX  CTRL+M IGNORE PLANE", 1.05);
     draw_text(x, height - 106, "CLICK CORNER, DRAG X/Y/Z", 1.25);
-    draw_text(x, height - 86, "LEFT ORBIT  RIGHT PAN  WHEEL ZOOM", 1.05);
+    draw_text(x, height - 86, camera_view() ? "DRAG CORNERS  WHEEL ZOOM" :
+                                             "LEFT ORBIT  RIGHT PAN  WHEEL ZOOM", 1.05);
     draw_button(x, height - 52, 294, 34, "REVIEW AND SAVE", false);
     if (save_preview_) draw_save_preview(width, height);
   }
@@ -1216,10 +1454,18 @@ class CalibrationApp {
     }
   }
 
+  void draw_camera_label() {
+    const auto origin = specter::transform_point(config_.camera_to_room, {0, 0, 0});
+    const auto screen = project({origin.x, origin.y, origin.z});
+    if (!screen) return;
+    glColor3f(0.45F, 0.8F, 1.0F);
+    draw_text(screen->x + 10, screen->y - 10, "KINECT DEPTH CAMERA", 1.15);
+  }
+
   void draw_track_labels() {
     for (const auto& track : track_states_) {
       const auto screen = project({track.centroid_m.x, track.centroid_m.y,
-                                   top_down_ ? 0.1 : track.centroid_m.z + track.bounds_m.z * 0.55});
+                                   top_down() ? 0.1 : track.centroid_m.z + track.bounds_m.z * 0.55});
       if (!screen) continue;
       if (track.classification == "likely_human") glColor3f(0.15F, 1.0F, 0.8F);
       else if (track.classification == "likely_animal") glColor3f(0.9F, 0.55F, 1.0F);
@@ -1270,16 +1516,18 @@ class CalibrationApp {
   specter::AppConfig edit_before_;
   std::string status_{"STARTING"};
   std::string rename_buffer_;
-  bool frozen_{}, top_down_{}, left_down_{}, right_down_{}, translating_{}, corner_click_{}, renaming_{}, save_preview_{};
+  bool frozen_{}, left_down_{}, right_down_{}, translating_{}, corner_click_{}, renaming_{}, save_preview_{};
   bool live_validation_{};
   bool object_tracking_{};
-  bool editing_plane_{};
+  bool editing_plane_{}, plane_corner_dragged_{};
+  ViewMode view_mode_{ViewMode::perspective};
   int selected_{-1}, selected_vertex_{-1};
   int selected_plane_{-1}, selected_plane_corner_{-1};
   bool selected_top_{};
   GizmoAxis gizmo_drag_{GizmoAxis::none};
   double mouse_x_{}, mouse_y_{};
   double orbit_yaw_{0.6}, orbit_pitch_{0.45}, orbit_distance_{4.0};
+  double camera_zoom_{1.0};
   double target_x_{}, target_y_{1.5}, target_z_{0.7};
   double top_scale_{3.0}, pan_x_{}, pan_y_{1.5};
 };

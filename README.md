@@ -104,6 +104,10 @@ Object tracking visualization is optional and off by default in the calibrator. 
 
 Bounded ignore planes mark reflective room surfaces whose depth rays are untrustworthy. Press `Ctrl+M` to create a one-metre-wide, 1.5-metre-tall plane at the current view target, initially vertical and facing the calibrated camera. Ignore planes are edited like zones but remain rigid rectangles: click the center and drag an X/Y/Z gizmo to move the plane, or click a corner and drag to resize it within its current plane. The panel provides rename, copy, delete, enable/disable, margin, and five-degree yaw/pitch controls. Planes render as translucent warning surfaces with an outline, corner handles, normal indicator, label, and live rejected-point count. With validation enabled, rejected returns appear magenta and disappear from foreground evidence and anonymous tracks before saving.
 
+The editor has three view modes. **3D** is the free orbiting room view, **Top** is the orthographic floor-plan view, and **Camera** uses the current depth frame's exact Kinect intrinsics (`fx`, `fy`, `cx`, `cy`, width, and height) with letterboxing as needed. Camera view therefore matches depth-image pixel/ray coordinates rather than the horizontally mirrored presentation used by the free 3D viewport. In 3D and Top views, the calibrated Kinect is rendered as a physical wireframe body with local axes, optical direction, real depth frustum, and a `KINECT DEPTH CAMERA` label; clicking it switches to Camera view. Start directly in that mode with `--camera-view`.
+
+In Camera view, the authored ignore surface outline and its expanded effective margin are rendered separately. Dragging an ignore-surface corner casts a ray through the corresponding depth pixel and intersects the existing room-space plane, allowing screen-space resizing without losing the plane's physical depth or coplanarity. Whole-plane depth/translation and orientation remain explicit 3D gizmo or panel operations because a single camera pixel cannot determine depth.
+
 Suggested bedroom-mapping workflow:
 
 1. Aim the Kinect so a useful patch of floor and the relevant occupied volumes are visible.
@@ -123,6 +127,9 @@ Viewport and editing controls:
 - `Ctrl+N`: create a new bounding box
 - `Ctrl+M`: create a new bounded ignore plane facing the calibrated camera
 - **Object Tracking On/Off**: toggle anonymous track bounds and labels without changing saved configuration
+- **3D / Top / Camera**: switch among free room editing, floor-plan editing, and the Kinect's horizontally mirrored depth projection
+- Click the rendered Kinect in 3D or Top view: enter exact Camera view
+- Mouse wheel in Camera view: zoom around the optical axis; the outlined sensor FOV remains visible as a reference
 - Every other editor action is a clickable panel control
 
 The editor rejects duplicate names, too-small or self-intersecting polygons, adjacent duplicate vertices, reversed/unreasonable height bounds, and coordinates outside ±50 metres before saving.
@@ -156,8 +163,9 @@ The optional top-level `ignore_planes` array contains rigid bounded rectangles i
 - `corners_m`: four ordered `{x,y,z}` corners forming a nondegenerate rectangle.
 - `margin_m`: bounded expansion beyond each edge, from 0 to 1 metre.
 - `surface_tolerance_m`: distance before the mathematical surface also treated as untrustworthy, from 0 to 0.2 metre.
+- `noise_threshold_points` (optional): reject matching plane returns only when their per-frame count is at or below this value. Omit it to reject every matching return, preserving the original behavior.
 
-For each frame geometry, the service precomputes the nearest enabled plane intersection for every camera pixel. A valid depth return is rejected before background learning when its camera ray intersects the bounded plane and the return lies on or behind that surface. Rejected values never contribute to background adaptation, occupancy, foreground point clouds, clustering, tracking, classification, or posture. Changing ignore-plane geometry invalidates the ray lookup without discarding the learned image-space background. Existing configurations without `ignore_planes` remain valid and behave as an empty list.
+For each frame geometry, the service precomputes the nearest enabled plane intersection for every camera pixel. A valid depth return matches when its camera ray intersects the bounded plane and the return lies on or behind that surface. A plane without `noise_threshold_points` rejects all matches. A thresholded plane rejects the whole matching set only while it is small enough to be noise; once the set exceeds the threshold, every return passes through so real-object geometry is not partially erased. Rejected values never contribute to background adaptation, occupancy, foreground point clouds, clustering, tracking, classification, or posture. Changing ignore-plane geometry invalidates the ray lookup without discarding the learned image-space background. Existing configurations without `ignore_planes` remain valid and behave as an empty list.
 
 Thresholds are sensor-resolution and scene dependent. Tune them from observations in the real room rather than treating the example values as universal.
 
@@ -189,7 +197,7 @@ Occupancy and health transitions publish immediately. Observation messages defau
 
 `tracks` is an additive schema-v1 field keyed by an ephemeral ID such as `track-3`. Each item reports `tracking_state` (`confirmed` or `coasting`), conservative classification and posture labels with confidence, room-space centroid/velocity/bounds, foreground evidence, intersected zone names, occlusion state, and freshness. IDs are meaningful only during the current uninterrupted sensor session and must never be treated as a person identity. Existing v1 consumers may ignore this field.
 
-The additive `ignore_planes` state object reports each configured plane's enabled state and the number of samples rejected in the latest valid frame. It contains derived counters only—never image or depth-frame data.
+The additive `ignore_planes` state object reports each configured plane's enabled state, `matched_points`, `rejected_points`, and nullable `noise_threshold_points` in the latest valid frame. This lets activity monitors distinguish below-threshold noise being suppressed from above-threshold object evidence passing through. It contains derived counters and configuration only—never image or depth-frame data.
 
 Inspect the stream from a terminal:
 

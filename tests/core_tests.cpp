@@ -63,7 +63,7 @@ specter::DepthFrame tracking_frame(bool objects, int horizontal_offset = 0) {
 specter::IgnorePlaneConfig test_ignore_plane() {
   return {"mirror", true,
           {{{-0.3, 2.0, 0.0}, {0.3, 2.0, 0.0}, {0.3, 2.0, 2.0}, {-0.3, 2.0, 2.0}}},
-          0.05, 0.03};
+          0.05, 0.03, std::nullopt};
 }
 
 specter::DepthFrame frame(float depth) {
@@ -78,9 +78,19 @@ void geometry_test() {
   transform.matrix = {1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3, 0, 0, 0, 1};
   const auto point = specter::transform_point(transform, {1, 2, 3});
   require(point.x == 2 && point.y == 4 && point.z == 6, "transform is incorrect");
+  const auto recovered = specter::transform_point(specter::invert_transform(transform), point);
+  require(std::abs(recovered.x - 1) < 1e-9 && std::abs(recovered.y - 2) < 1e-9 &&
+          std::abs(recovered.z - 3) < 1e-9, "inverse camera transform is incorrect");
   const auto left = specter::deproject_depth({100, 100, 50, 40}, 25, 40, 2);
   const auto right = specter::deproject_depth({100, 100, 50, 40}, 75, 40, 2);
   require(left.x < 0 && right.x > 0, "depth deprojection changed camera-space handedness");
+  const specter::Intrinsics intrinsics{100, 100, 50, 40};
+  const auto room = specter::transform_point(transform, specter::deproject_depth(intrinsics, 25, 30, 2));
+  const auto pixel = specter::project_room_to_depth(transform, intrinsics, room);
+  require(pixel && std::abs(pixel->x - 25) < 1e-9 && std::abs(pixel->y - 30) < 1e-9,
+          "room point did not round-trip through camera projection");
+  require(!specter::project_room_to_depth(transform, intrinsics,
+          specter::transform_point(transform, {0, 0, -1})), "point behind camera projected into depth image");
 
   const auto plane = test_ignore_plane();
   const auto hit = specter::ray_ignore_plane_intersection(plane, {0, 0, 1}, {0, 1, 0});
@@ -188,7 +198,33 @@ void ignore_plane_pipeline_test() {
   require(pipeline.last_ignore_plane_states().size() == 1 &&
           pipeline.last_ignore_plane_states()[0].rejected_points > 0,
           "ignore plane diagnostics omitted rejected samples");
+  require(pipeline.last_ignore_plane_states()[0].matched_points ==
+              pipeline.last_ignore_plane_states()[0].rejected_points,
+          "full-ignore plane activity did not report all matched samples");
   require(!pipeline.last_ignored_points().empty(), "calibration diagnostics omitted ignored room points");
+
+  auto thresholded_config = config;
+  thresholded_config.ignore_planes[0].noise_threshold_points = 0;
+  specter::OccupancyPipeline thresholded(thresholded_config, true);
+  thresholded.process(scene(4000));
+  thresholded.process(scene(4000));
+  const auto thresholded_states = thresholded.process(reflected);
+  require(thresholded.last_ignore_plane_states()[0].rejected_points == 0,
+          "above-threshold plane evidence was partially rejected");
+  require(thresholded.last_ignore_plane_states()[0].matched_points > 0,
+          "above-threshold plane activity was not reported");
+  require(thresholded.last_ignore_plane_states()[0].noise_threshold_points == 0,
+          "plane activity diagnostics omitted sensitivity");
+  require(thresholded_states[0].foreground_points > states[0].foreground_points,
+          "above-threshold plane evidence did not pass through to occupancy");
+  thresholded_config.ignore_planes[0].noise_threshold_points = 1000000;
+  thresholded.set_ignore_planes(thresholded_config.ignore_planes);
+  thresholded.process(reflected);
+  require(thresholded.last_ignore_plane_states()[0].rejected_points > 0,
+          "below-threshold plane noise was not rejected");
+  require(thresholded.last_ignore_plane_states()[0].matched_points ==
+              thresholded.last_ignore_plane_states()[0].rejected_points,
+          "suppressed plane activity counters disagree");
 
   pipeline.set_ignore_planes({});
   pipeline.process(reflected);
@@ -244,6 +280,7 @@ void validation_test() {
 void config_round_trip_test() {
   auto config = test_config();
   config.ignore_planes = {test_ignore_plane()};
+  config.ignore_planes[0].noise_threshold_points = 42;
   const auto text = specter::serialize_config(config);
   const auto json = boost::json::parse(text).as_object();
   require(json.at("camera_to_room").as_array().size() == 16, "serialized transform size mismatch");
@@ -252,6 +289,8 @@ void config_round_trip_test() {
   require(json.at("tracking").as_object().at("enabled").as_bool() == config.tracking.enabled,
           "serialized tracking config mismatch");
   require(json.at("ignore_planes").as_array().size() == 1, "serialized ignore plane mismatch");
+  require(json.at("ignore_planes").as_array().front().as_object().at("noise_threshold_points").to_number<std::size_t>() == 42,
+          "serialized ignore-plane noise threshold mismatch");
   const auto path = std::filesystem::temp_directory_path() /
       ("specter-sense-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
   specter::save_config_atomic(path, config);
@@ -259,6 +298,8 @@ void config_round_trip_test() {
   std::filesystem::remove(path);
   require(loaded.zones.size() == 1 && loaded.zones.front().name == "room" && loaded.ignore_planes.size() == 1,
           "atomic config round-trip failed");
+  require(loaded.ignore_planes.front().noise_threshold_points == 42,
+          "ignore-plane noise threshold round-trip failed");
 
   auto legacy = json;
   legacy.erase("ignore_planes");
@@ -344,7 +385,7 @@ void json_test() {
   snapshot.tracks = {{"track-7", "confirmed", "likely_human", 0.8, "standing", 0.7,
                       {1, 2, 0.9}, {0.1, 0, 0}, {0.5, 0.4, 1.7}, 500, {"desk"}, false,
                       snapshot.generated_at}};
-  snapshot.ignore_planes = {{"mirror", true, 321}};
+  snapshot.ignore_planes = {{"mirror", true, 321, 456, 500}};
   const auto json = specter::snapshot_to_json(snapshot).as_object();
   require(json.at("schema_version").as_int64() == 1, "schema version mismatch");
   require(json.at("zones").as_object().at("desk").as_object().at("occupied").as_bool(), "zone JSON mismatch");
@@ -353,6 +394,10 @@ void json_test() {
   require(track.at("bounds_m").as_object().at("height").as_double() == 1.7, "track bounds JSON mismatch");
   require(json.at("ignore_planes").as_object().at("mirror").as_object().at("rejected_points").to_number<std::size_t>() == 321,
           "ignore plane diagnostics JSON mismatch");
+  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("matched_points").to_number<std::size_t>() == 456,
+          "ignore plane matched activity JSON mismatch");
+  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("noise_threshold_points").to_number<std::size_t>() == 500,
+          "ignore plane sensitivity JSON mismatch");
 }
 
 }  // namespace

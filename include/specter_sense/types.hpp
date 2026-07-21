@@ -78,6 +78,7 @@ struct IgnorePlaneConfig {
   std::array<Point3, 4> corners_m;
   double margin_m{0.05};
   double surface_tolerance_m{0.03};
+  std::optional<std::size_t> noise_threshold_points;
 };
 
 struct AppConfig {
@@ -125,6 +126,8 @@ struct IgnorePlaneState {
   std::string name;
   bool enabled{};
   std::size_t rejected_points{};
+  std::size_t matched_points{};
+  std::optional<std::size_t> noise_threshold_points;
 };
 
 struct Snapshot {
