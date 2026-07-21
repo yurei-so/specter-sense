@@ -86,10 +86,17 @@ Options parse_options(int argc, char** argv) {
 
 std::unique_ptr<specter::FrameSource> make_source(const specter::SensorConfig& sensor) {
   if (sensor.source == "synthetic") return specter::make_synthetic_source();
-#ifdef SPECTER_SENSE_HAS_KINECT
-  if (sensor.source == "kinect") return specter::make_kinect_source(sensor.serial);
+#ifdef SPECTER_SENSE_HAS_KINECT_V1
+  if (sensor.source == "kinect-v1") return specter::make_kinect_v1_source(sensor.serial);
 #else
-  if (sensor.source == "kinect") throw std::runtime_error("binary was built without libfreenect2 support");
+  if (sensor.source == "kinect-v1") throw std::runtime_error("binary was built without libfreenect support");
+#endif
+#ifdef SPECTER_SENSE_HAS_KINECT_V2
+  if (sensor.source == "kinect" || sensor.source == "kinect-v2")
+    return specter::make_kinect_v2_source(sensor.serial);
+#else
+  if (sensor.source == "kinect" || sensor.source == "kinect-v2")
+    throw std::runtime_error("binary was built without libfreenect2 support");
 #endif
   throw std::runtime_error("unknown source: " + sensor.source);
 }

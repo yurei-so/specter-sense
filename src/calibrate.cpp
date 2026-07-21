@@ -201,10 +201,17 @@ class CalibrationApp {
 
   void connect_source() {
     if (config_.source == "synthetic") source_ = specter::make_synthetic_source();
-#ifdef SPECTER_SENSE_HAS_KINECT
-    else if (config_.source == "kinect") source_ = specter::make_kinect_source(config_.serial);
+#ifdef SPECTER_SENSE_HAS_KINECT_V1
+    else if (config_.source == "kinect-v1") source_ = specter::make_kinect_v1_source(config_.serial);
 #else
-    else if (config_.source == "kinect") throw std::runtime_error("calibrator built without Kinect support");
+    else if (config_.source == "kinect-v1") throw std::runtime_error("calibrator built without Kinect V1 support");
+#endif
+#ifdef SPECTER_SENSE_HAS_KINECT_V2
+    else if (config_.source == "kinect" || config_.source == "kinect-v2")
+      source_ = specter::make_kinect_v2_source(config_.serial);
+#else
+    else if (config_.source == "kinect" || config_.source == "kinect-v2")
+      throw std::runtime_error("calibrator built without Kinect V2 support");
 #endif
     else throw std::runtime_error("unknown source: " + config_.source);
     status_ = "CONNECTED TO " + source_->name();

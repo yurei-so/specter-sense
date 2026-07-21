@@ -6,7 +6,7 @@ Privacy-first spatial awareness for LLM-powered home assistants.
 
 ## Current scope
 
-- Native C++20 depth pipeline using `libfreenect2`
+- Native C++20 depth pipeline using `libfreenect` for Kinect V1 and `libfreenect2` for Kinect V2
 - Explicit camera-to-room metric transform
 - Stable zones defined as floor polygons with height bounds
 - Slowly adapting per-pixel background model
@@ -34,7 +34,13 @@ ctest --test-dir build --output-on-failure
 
 The optional calibration executable also requires the Debian `libglfw3-dev` and OpenGL development packages. If they are absent, CMake reports that condition and still builds the dependency-light headless service.
 
-`FREENECT2_ROOT` must contain `include/libfreenect2` and either `lib`, `build/lib`, or an otherwise discoverable `libfreenect2` library. If it is omitted and the library cannot be found, CMake still builds a synthetic-only binary.
+Kinect V1 support uses Debian's `libfreenect-dev` package, or a custom prefix selected with `FREENECT_ROOT`. Kinect V2 support uses `FREENECT2_ROOT`, which must contain `include/libfreenect2` and either `lib`, `build/lib`, or an otherwise discoverable library. Either backend is disabled independently when its library is unavailable; the synthetic source always remains buildable.
+
+On Debian, install the V1 driver and diagnostics with:
+
+```sh
+sudo apt-get install freenect libfreenect-dev
+```
 
 When using an uninstalled source build, its shared library may need to be exposed at runtime:
 
@@ -53,17 +59,18 @@ cp .env.example .env
 
 All sensor identity, source, calibration, and processing information lives in the JSON configuration. The ignored `.env` only selects that config and process-level outputs. Command-line options remain available for one-off process overrides and take precedence over `.env`. Set `SPECTER_SENSE_ENV=/path/to/file` to use a different environment file. Omit `--frames` to run until `SIGINT` or `SIGTERM`.
 
-## Run with Kinect V2
+## Run with Kinect V1 or V2
 
 ```sh
 cp config/specter-sense.example.json config/specter-sense.local.json
 cp .env.example .env
-# Edit the JSON sensor entry to use source "kinect" and set its hardware serial.
+# Edit each JSON sensor entry to use source "kinect-v1" or "kinect-v2".
+# Set a hardware serial when selecting among multiple sensors of one model.
 # Point SPECTER_SENSE_CONFIG in .env at config/specter-sense.local.json.
 ./build/specter-sense
 ```
 
-Only the depth stream is requested. Startup and reconnect events go to stderr as one-line JSON. After three consecutive frame timeouts the device is reopened with exponential backoff capped at 32 seconds. Socket state—and the optional state file when enabled—reports timeout, stale, and reconnect conditions instead of retaining a silently healthy sensor state.
+Only the depth stream is requested from either generation. Startup and reconnect events go to stderr as one-line JSON. After three consecutive frame timeouts the device is reopened with exponential backoff capped at 32 seconds. Socket state—and the optional state file when enabled—reports timeout, stale, and reconnect conditions instead of retaining a silently healthy sensor state.
 
 ## Room coordinates and calibration
 
@@ -142,8 +149,8 @@ See [config/specter-sense.example.json](config/specter-sense.example.json).
 The top-level `sensors` array may contain any number of independent sensor entries. Every entry owns the complete former single-sensor configuration:
 
 - `name`: stable unique key used in state output and logs.
-- `source`: `synthetic` or `kinect`.
-- `serial`: optional Kinect V2 hardware serial. It is required on every Kinect entry when more than one Kinect is configured.
+- `source`: `synthetic`, `kinect-v1`, or `kinect-v2` (`kinect` remains a compatibility alias for V2).
+- `serial`: optional Kinect hardware serial. It is required on every entry when more than one sensor of the same model is configured.
 - `camera_to_room`, `processing`, `tracking`, `ignore_planes`, and `zones`: calibration and pipeline state for that sensor.
 
 Each sensor runs in its own acquisition/reconnect worker, so a timeout or reconnect on one sensor does not block the others. To add another sensor, duplicate an entry, give it a unique name and hardware serial, and calibrate it with `specter-sense-calibrate --sensor NAME`.

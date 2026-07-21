@@ -17,8 +17,11 @@ class FrameSource {
 };
 
 std::unique_ptr<FrameSource> make_synthetic_source();
-#ifdef SPECTER_SENSE_HAS_KINECT
-std::unique_ptr<FrameSource> make_kinect_source(const std::optional<std::string>& serial = std::nullopt);
+#ifdef SPECTER_SENSE_HAS_KINECT_V1
+std::unique_ptr<FrameSource> make_kinect_v1_source(const std::optional<std::string>& serial = std::nullopt);
+#endif
+#ifdef SPECTER_SENSE_HAS_KINECT_V2
+std::unique_ptr<FrameSource> make_kinect_v2_source(const std::optional<std::string>& serial = std::nullopt);
 #endif
 
 }  // namespace specter

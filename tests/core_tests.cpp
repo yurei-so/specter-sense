@@ -324,6 +324,22 @@ void config_round_trip_test() {
   second.name = "second";
   multiple.sensors.push_back(second);
   specter::validate_config(multiple);
+
+  auto generations = app_config;
+  generations.sensors[0].source = "kinect-v1";
+  second.source = "kinect-v2";
+  generations.sensors.push_back(second);
+  specter::validate_config(generations);
+
+  second.source = "kinect-v1";
+  generations.sensors[1] = second;
+  rejected = false;
+  try {
+    specter::validate_config(generations);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  require(rejected, "multiple same-model Kinects without serials were accepted");
 }
 
 std::string receive_message(int fd) {

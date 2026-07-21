@@ -54,7 +54,7 @@ class KinectSource final : public FrameSource {
 
 }  // namespace
 
-std::unique_ptr<FrameSource> make_kinect_source(const std::optional<std::string>& serial) {
+std::unique_ptr<FrameSource> make_kinect_v2_source(const std::optional<std::string>& serial) {
   return std::make_unique<KinectSource>(serial);
 }
 

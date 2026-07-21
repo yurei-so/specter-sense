@@ -9,6 +9,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 
 namespace specter {
 namespace {
@@ -252,20 +253,26 @@ AppConfig load_config(const std::filesystem::path& path) {
 
 void validate_config(const AppConfig& config) {
   if (config.sensors.empty()) throw std::runtime_error("at least one sensor is required");
-  const auto kinect_count = std::count_if(config.sensors.begin(), config.sensors.end(),
-      [](const auto& sensor) { return sensor.source == "kinect"; });
   std::set<std::string> names;
   std::set<std::string> serials;
   for (const auto& sensor : config.sensors) {
     if (sensor.name.empty()) throw std::runtime_error("sensor name cannot be empty");
     if (!names.insert(sensor.name).second) throw std::runtime_error("duplicate sensor name: " + sensor.name);
-    if (sensor.source != "synthetic" && sensor.source != "kinect")
+    if (sensor.source != "synthetic" && sensor.source != "kinect" &&
+        sensor.source != "kinect-v1" && sensor.source != "kinect-v2")
       throw std::runtime_error("sensor " + sensor.name + " has unknown source: " + sensor.source);
     if (sensor.serial && sensor.serial->empty()) throw std::runtime_error("sensor " + sensor.name + " serial cannot be empty");
-    if (sensor.source != "kinect" && sensor.serial)
-      throw std::runtime_error("sensor " + sensor.name + " serial is only valid for a kinect source");
-    if (sensor.source == "kinect" && kinect_count > 1 && !sensor.serial)
-      throw std::runtime_error("sensor " + sensor.name + " requires a serial when multiple Kinect sensors are configured");
+    if (sensor.source == "synthetic" && sensor.serial)
+      throw std::runtime_error("sensor " + sensor.name + " serial is only valid for a Kinect source");
+    const auto model = sensor.source == "kinect" ? std::string_view("kinect-v2") : std::string_view(sensor.source);
+    const auto same_model_count = std::count_if(config.sensors.begin(), config.sensors.end(),
+        [&](const auto& candidate) {
+          const auto candidate_model = candidate.source == "kinect"
+              ? std::string_view("kinect-v2") : std::string_view(candidate.source);
+          return candidate_model == model;
+        });
+    if (sensor.source != "synthetic" && same_model_count > 1 && !sensor.serial)
+      throw std::runtime_error("sensor " + sensor.name + " requires a serial when multiple sensors of its model are configured");
     if (sensor.serial && !serials.insert(*sensor.serial).second)
       throw std::runtime_error("duplicate sensor serial: " + *sensor.serial);
     validate_sensor(sensor);
