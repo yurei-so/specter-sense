@@ -43,9 +43,23 @@ bool same_health(const SensorState& left, const SensorState& right) {
 }
 
 bool same_occupancy(const Snapshot& left, const Snapshot& right) {
-  if (left.zones.size() != right.zones.size()) return false;
-  for (std::size_t i = 0; i < left.zones.size(); ++i)
-    if (left.zones[i].name != right.zones[i].name || left.zones[i].occupied != right.zones[i].occupied) return false;
+  if (left.sensors.size() != right.sensors.size()) return false;
+  for (std::size_t sensor = 0; sensor < left.sensors.size(); ++sensor) {
+    if (left.sensors[sensor].first != right.sensors[sensor].first) return false;
+    const auto& left_zones = left.sensors[sensor].second.zones;
+    const auto& right_zones = right.sensors[sensor].second.zones;
+    if (left_zones.size() != right_zones.size()) return false;
+    for (std::size_t i = 0; i < left_zones.size(); ++i)
+      if (left_zones[i].name != right_zones[i].name || left_zones[i].occupied != right_zones[i].occupied) return false;
+  }
+  return true;
+}
+
+bool same_health(const Snapshot& left, const Snapshot& right) {
+  if (left.sensors.size() != right.sensors.size()) return false;
+  for (std::size_t i = 0; i < left.sensors.size(); ++i)
+    if (left.sensors[i].first != right.sensors[i].first ||
+        !same_health(left.sensors[i].second.sensor, right.sensors[i].second.sensor)) return false;
   return true;
 }
 
@@ -171,7 +185,7 @@ struct SocketPublisher::Impl {
 
   void publish(const Snapshot& snapshot) {
     const auto now = std::chrono::steady_clock::now();
-    const bool health_changed = !latest || !same_health(latest->sensor, snapshot.sensor);
+    const bool health_changed = !latest || !same_health(*latest, snapshot);
     const bool occupancy_changed = !latest || !same_occupancy(*latest, snapshot);
     const bool observation_due = !last_broadcast || now - *last_broadcast >= observation_interval;
     accept_clients();

@@ -81,12 +81,19 @@ struct IgnorePlaneConfig {
   std::optional<std::size_t> noise_threshold_points;
 };
 
-struct AppConfig {
+struct SensorConfig {
+  std::string name;
+  std::string source{"synthetic"};
+  std::optional<std::string> serial;
   Transform camera_to_room;
   ProcessingConfig processing;
   TrackingConfig tracking;
   std::vector<IgnorePlaneConfig> ignore_planes;
   std::vector<ZoneConfig> zones;
+};
+
+struct AppConfig {
+  std::vector<SensorConfig> sensors;
 };
 
 struct ZoneState {
@@ -131,13 +138,17 @@ struct IgnorePlaneState {
   std::optional<std::size_t> noise_threshold_points;
 };
 
-struct Snapshot {
-  std::chrono::system_clock::time_point generated_at;
+struct SensorSnapshot {
   std::optional<std::chrono::system_clock::time_point> last_valid_frame_at;
   SensorState sensor;
   std::vector<ZoneState> zones;
   std::vector<TrackState> tracks;
   std::vector<IgnorePlaneState> ignore_planes;
+};
+
+struct Snapshot {
+  std::chrono::system_clock::time_point generated_at;
+  std::vector<std::pair<std::string, SensorSnapshot>> sensors;
 };
 
 }  // namespace specter

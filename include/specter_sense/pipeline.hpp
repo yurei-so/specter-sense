@@ -20,7 +20,7 @@ std::optional<double> ray_ignore_plane_intersection(
 
 class OccupancyPipeline {
  public:
-  explicit OccupancyPipeline(AppConfig config, bool retain_foreground_points = false);
+  explicit OccupancyPipeline(SensorConfig config, bool retain_foreground_points = false);
   std::vector<ZoneState> process(const DepthFrame& frame);
   void set_tracking_enabled(bool enabled);
   void set_ignore_planes(std::vector<IgnorePlaneConfig> planes);
@@ -62,7 +62,7 @@ class OccupancyPipeline {
     std::size_t plane_index{std::numeric_limits<std::size_t>::max()};
   };
 
-  AppConfig config_;
+  SensorConfig config_;
   std::vector<float> background_m_;
   std::vector<ZoneRuntime> runtime_;
   std::size_t width_{};

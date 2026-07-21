@@ -28,8 +28,9 @@ void require(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
 }
 
-specter::AppConfig test_config() {
-  specter::AppConfig config;
+specter::SensorConfig test_config() {
+  specter::SensorConfig config;
+  config.name = "test";
   config.processing = {0.5, 4.0, 0.2, 0.0, 1};
   config.tracking.enabled = false;
   config.camera_to_room.matrix = {1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1, 0, 0, 0, 1};
@@ -240,7 +241,7 @@ void validation_test() {
   config.zones.push_back(config.zones.front());
   bool rejected = false;
   try {
-    specter::validate_config(config);
+    specter::validate_sensor(config);
   } catch (const std::runtime_error&) {
     rejected = true;
   }
@@ -250,7 +251,7 @@ void validation_test() {
   config.zones[0].floor_polygon = {{0, 0}, {1, 1}, {0, 1}, {1, 0}};
   rejected = false;
   try {
-    specter::validate_config(config);
+    specter::validate_sensor(config);
   } catch (const std::runtime_error&) {
     rejected = true;
   }
@@ -262,7 +263,7 @@ void validation_test() {
   config.ignore_planes = {invalid_plane};
   rejected = false;
   try {
-    specter::validate_config(config);
+    specter::validate_sensor(config);
   } catch (const std::runtime_error&) {
     rejected = true;
   }
@@ -274,7 +275,7 @@ void validation_test() {
   config.ignore_planes = {camera_plane};
   rejected = false;
   try {
-    specter::validate_config(config);
+    specter::validate_sensor(config);
   } catch (const std::runtime_error&) {
     rejected = true;
   }
@@ -285,35 +286,44 @@ void config_round_trip_test() {
   auto config = test_config();
   config.ignore_planes = {test_ignore_plane()};
   config.ignore_planes[0].noise_threshold_points = 42;
-  const auto text = specter::serialize_config(config);
+  specter::AppConfig app_config{{config}};
+  const auto text = specter::serialize_config(app_config);
   const auto json = boost::json::parse(text).as_object();
-  require(json.at("camera_to_room").as_array().size() == 16, "serialized transform size mismatch");
-  require(json.at("zones").as_array().front().as_object().at("name").as_string() == "room",
+  const auto& sensor = json.at("sensors").as_array().front().as_object();
+  require(sensor.at("camera_to_room").as_array().size() == 16, "serialized transform size mismatch");
+  require(sensor.at("zones").as_array().front().as_object().at("name").as_string() == "room",
           "serialized zone mismatch");
-  require(json.at("tracking").as_object().at("enabled").as_bool() == config.tracking.enabled,
+  require(sensor.at("tracking").as_object().at("enabled").as_bool() == config.tracking.enabled,
           "serialized tracking config mismatch");
-  require(json.at("ignore_planes").as_array().size() == 1, "serialized ignore plane mismatch");
-  require(json.at("ignore_planes").as_array().front().as_object().at("noise_threshold_points").to_number<std::size_t>() == 42,
+  require(sensor.at("ignore_planes").as_array().size() == 1, "serialized ignore plane mismatch");
+  require(sensor.at("ignore_planes").as_array().front().as_object().at("noise_threshold_points").to_number<std::size_t>() == 42,
           "serialized ignore-plane noise threshold mismatch");
   const auto path = std::filesystem::temp_directory_path() /
       ("specter-sense-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
-  specter::save_config_atomic(path, config);
+  specter::save_config_atomic(path, app_config);
   const auto loaded = specter::load_config(path);
   std::filesystem::remove(path);
-  require(loaded.zones.size() == 1 && loaded.zones.front().name == "room" && loaded.ignore_planes.size() == 1,
+  require(loaded.sensors.size() == 1 && loaded.sensors.front().zones.front().name == "room" &&
+              loaded.sensors.front().ignore_planes.size() == 1,
           "atomic config round-trip failed");
-  require(loaded.ignore_planes.front().noise_threshold_points == 42,
+  require(loaded.sensors.front().ignore_planes.front().noise_threshold_points == 42,
           "ignore-plane noise threshold round-trip failed");
 
-  auto legacy = json;
-  legacy.erase("ignore_planes");
-  {
-    std::ofstream output(path);
-    output << boost::json::serialize(legacy);
+  auto duplicate = app_config;
+  duplicate.sensors.push_back(config);
+  bool rejected = false;
+  try {
+    specter::validate_config(duplicate);
+  } catch (const std::runtime_error&) {
+    rejected = true;
   }
-  const auto legacy_loaded = specter::load_config(path);
-  std::filesystem::remove(path);
-  require(legacy_loaded.ignore_planes.empty(), "legacy config without ignore_planes was not accepted");
+  require(rejected, "duplicate sensor name was accepted");
+
+  auto multiple = app_config;
+  auto second = config;
+  second.name = "second";
+  multiple.sensors.push_back(second);
+  specter::validate_config(multiple);
 }
 
 std::string receive_message(int fd) {
@@ -342,9 +352,11 @@ void socket_publisher_test() {
     }
     specter::Snapshot snapshot;
     snapshot.generated_at = std::chrono::system_clock::now();
-    snapshot.last_valid_frame_at = snapshot.generated_at;
-    snapshot.sensor = {true, false, "streaming"};
-    snapshot.zones = {{"room", false, 0, 0, std::nullopt, std::nullopt, std::nullopt, snapshot.generated_at}};
+    specter::SensorSnapshot sensor;
+    sensor.last_valid_frame_at = snapshot.generated_at;
+    sensor.sensor = {true, false, "streaming"};
+    sensor.zones = {{"room", false, 0, 0, std::nullopt, std::nullopt, std::nullopt, snapshot.generated_at}};
+    snapshot.sensors = {{"test", sensor}};
     publisher->publish(snapshot);
 
     client = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -359,10 +371,11 @@ void socket_publisher_test() {
     publisher->publish(snapshot);
     const auto first = boost::json::parse(receive_message(client)).as_object();
     require(first.at("type").as_string() == "snapshot", "new client did not receive a snapshot");
-    require(first.at("state").as_object().at("zones").as_object().contains("room"), "snapshot omitted zone state");
+    require(first.at("state").as_object().at("sensors").as_object().at("test").as_object()
+                .at("zones").as_object().contains("room"), "snapshot omitted zone state");
 
     snapshot.generated_at = std::chrono::system_clock::now();
-    snapshot.zones[0].occupied = true;
+    snapshot.sensors[0].second.zones[0].occupied = true;
     publisher->publish(snapshot);
     const auto changed = boost::json::parse(receive_message(client)).as_object();
     require(changed.at("type").as_string() == "state", "occupancy change did not emit state event");
@@ -383,26 +396,29 @@ void socket_publisher_test() {
 void json_test() {
   specter::Snapshot snapshot;
   snapshot.generated_at = std::chrono::system_clock::now();
-  snapshot.last_valid_frame_at = snapshot.generated_at;
-  snapshot.sensor = {true, false, "streaming"};
-  snapshot.zones = {{"desk", true, 1.0, 42, specter::Point3{1, 2, 3}, 1.2, 2.1, snapshot.generated_at}};
-  snapshot.tracks = {{"track-7", "confirmed", "likely_human", 0.8, "standing", 0.7,
+  specter::SensorSnapshot sensor;
+  sensor.last_valid_frame_at = snapshot.generated_at;
+  sensor.sensor = {true, false, "streaming"};
+  sensor.zones = {{"desk", true, 1.0, 42, specter::Point3{1, 2, 3}, 1.2, 2.1, snapshot.generated_at}};
+  sensor.tracks = {{"track-7", "confirmed", "likely_human", 0.8, "standing", 0.7,
                       {1, 2, 0.9}, {0.1, 0, 0}, {0.5, 0.4, 1.7}, 500, {"desk"}, false,
                       snapshot.generated_at}};
-  snapshot.ignore_planes = {{"mirror", true, 321, 456, 123, 500}};
+  sensor.ignore_planes = {{"mirror", true, 321, 456, 123, 500}};
+  snapshot.sensors = {{"test", sensor}};
   const auto json = specter::snapshot_to_json(snapshot).as_object();
-  require(json.at("schema_version").as_int64() == 1, "schema version mismatch");
-  require(json.at("zones").as_object().at("desk").as_object().at("occupied").as_bool(), "zone JSON mismatch");
-  const auto& track = json.at("tracks").as_object().at("track-7").as_object();
+  require(json.at("schema_version").as_int64() == 2, "schema version mismatch");
+  const auto& sensor_json = json.at("sensors").as_object().at("test").as_object();
+  require(sensor_json.at("zones").as_object().at("desk").as_object().at("occupied").as_bool(), "zone JSON mismatch");
+  const auto& track = sensor_json.at("tracks").as_object().at("track-7").as_object();
   require(track.at("posture").as_string() == "standing", "track JSON mismatch");
   require(track.at("bounds_m").as_object().at("height").as_double() == 1.7, "track bounds JSON mismatch");
-  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("rejected_points").to_number<std::size_t>() == 321,
+  require(sensor_json.at("ignore_planes").as_object().at("mirror").as_object().at("rejected_points").to_number<std::size_t>() == 321,
           "ignore plane diagnostics JSON mismatch");
-  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("matched_points").to_number<std::size_t>() == 456,
+  require(sensor_json.at("ignore_planes").as_object().at("mirror").as_object().at("matched_points").to_number<std::size_t>() == 456,
           "ignore plane matched activity JSON mismatch");
-  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("activity_points").to_number<std::size_t>() == 123,
+  require(sensor_json.at("ignore_planes").as_object().at("mirror").as_object().at("activity_points").to_number<std::size_t>() == 123,
           "ignore plane foreground activity JSON mismatch");
-  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("noise_threshold_points").to_number<std::size_t>() == 500,
+  require(sensor_json.at("ignore_planes").as_object().at("mirror").as_object().at("noise_threshold_points").to_number<std::size_t>() == 500,
           "ignore plane sensitivity JSON mismatch");
 }
 

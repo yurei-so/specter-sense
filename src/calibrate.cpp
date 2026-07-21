@@ -103,7 +103,7 @@ void draw_text(double x, double y, const std::string& text, double scale = 2.0) 
 
 struct Options {
   std::filesystem::path config{"config/specter-sense.example.json"};
-  std::string source{"kinect"};
+  std::optional<std::string> sensor;
   bool object_tracking{};
   bool camera_view{};
 };
@@ -113,7 +113,6 @@ Options parse_options(int argc, char** argv) {
   const char* env_file = std::getenv("SPECTER_SENSE_ENV");
   specter::load_dotenv_if_present(env_file && *env_file ? env_file : ".env");
   if (const char* value = std::getenv("SPECTER_SENSE_CONFIG"); value && *value) options.config = value;
-  if (const char* value = std::getenv("SPECTER_SENSE_SOURCE"); value && *value) options.source = value;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto value = [&]() -> std::string {
@@ -121,11 +120,11 @@ Options parse_options(int argc, char** argv) {
       return argv[i];
     };
     if (arg == "--config") options.config = value();
-    else if (arg == "--source") options.source = value();
+    else if (arg == "--sensor") options.sensor = value();
     else if (arg == "--object-tracking") options.object_tracking = true;
     else if (arg == "--camera-view") options.camera_view = true;
     else if (arg == "--help") {
-      std::cout << "Usage: specter-sense-calibrate [--config PATH] [--source kinect|synthetic] "
+      std::cout << "Usage: specter-sense-calibrate [--config PATH] [--sensor NAME] "
                    "[--object-tracking] [--camera-view]\n";
       std::exit(0);
     } else throw std::runtime_error("unknown argument: " + arg);
@@ -136,7 +135,8 @@ Options parse_options(int argc, char** argv) {
 class CalibrationApp {
  public:
   explicit CalibrationApp(Options options)
-      : options_(std::move(options)), config_(specter::load_config(options_.config)),
+      : options_(std::move(options)), app_config_(specter::load_config(options_.config)),
+        sensor_index_(select_sensor(app_config_, options_.sensor)), config_(app_config_.sensors[sensor_index_]),
         original_(config_), pipeline_(std::make_unique<specter::OccupancyPipeline>(config_, true)),
         object_tracking_(options_.object_tracking) {
     pipeline_->set_tracking_enabled(object_tracking_);
@@ -173,6 +173,13 @@ class CalibrationApp {
   }
 
  private:
+  static std::size_t select_sensor(const specter::AppConfig& config, const std::optional<std::string>& name) {
+    if (!name) return 0;
+    const auto found = std::find_if(config.sensors.begin(), config.sensors.end(),
+        [&](const auto& sensor) { return sensor.name == *name; });
+    if (found == config.sensors.end()) throw std::runtime_error("unknown configured sensor: " + *name);
+    return static_cast<std::size_t>(found - config.sensors.begin());
+  }
   enum class GizmoAxis { none, x, y, z };
   enum class ViewMode { perspective, top_down, camera };
 
@@ -193,13 +200,13 @@ class CalibrationApp {
   static void scroll_callback(GLFWwindow* window, double, double y) { self(window).on_scroll(y); }
 
   void connect_source() {
-    if (options_.source == "synthetic") source_ = specter::make_synthetic_source();
+    if (config_.source == "synthetic") source_ = specter::make_synthetic_source();
 #ifdef SPECTER_SENSE_HAS_KINECT
-    else if (options_.source == "kinect") source_ = specter::make_kinect_source();
+    else if (config_.source == "kinect") source_ = specter::make_kinect_source(config_.serial);
 #else
-    else if (options_.source == "kinect") throw std::runtime_error("calibrator built without Kinect support");
+    else if (config_.source == "kinect") throw std::runtime_error("calibrator built without Kinect support");
 #endif
-    else throw std::runtime_error("unknown source: " + options_.source);
+    else throw std::runtime_error("unknown source: " + config_.source);
     status_ = "CONNECTED TO " + source_->name();
   }
 
@@ -235,7 +242,7 @@ class CalibrationApp {
 
   void rebuild_pipeline() {
     try {
-      specter::validate_config(config_);
+      specter::validate_sensor(config_);
       pipeline_ = std::make_unique<specter::OccupancyPipeline>(config_, true);
       pipeline_->set_tracking_enabled(object_tracking_);
       track_states_.clear();
@@ -255,14 +262,14 @@ class CalibrationApp {
     }
   }
 
-  void remember(const specter::AppConfig& before) {
+  void remember(const specter::SensorConfig& before) {
     undo_.push_back(before);
     if (undo_.size() > 100) undo_.erase(undo_.begin());
     redo_.clear();
     rebuild_pipeline();
   }
 
-  void remember_ignore_planes(const specter::AppConfig& before) {
+  void remember_ignore_planes(const specter::SensorConfig& before) {
     undo_.push_back(before);
     if (undo_.size() > 100) undo_.erase(undo_.begin());
     redo_.clear();
@@ -848,7 +855,8 @@ class CalibrationApp {
 
   void confirm_save() {
     try {
-      specter::save_config_atomic(options_.config, config_);
+      app_config_.sensors[sensor_index_] = config_;
+      specter::save_config_atomic(options_.config, app_config_);
       original_ = config_;
       status_ = "SAVED ATOMICALLY: " + options_.config.string();
     } catch (const std::exception& error) { status_ = std::string("SAVE FAILED: ") + error.what(); }
@@ -981,7 +989,7 @@ class CalibrationApp {
 
   void validate_for_preview() {
     try {
-      specter::validate_config(config_);
+      specter::validate_sensor(config_);
       save_preview_ = true;
       status_ = "SAVE PREVIEW VALID - ENTER CONFIRMS, ESC CANCELS";
     } catch (const std::exception& error) { status_ = std::string("CANNOT SAVE: ") + error.what(); }
@@ -1493,15 +1501,18 @@ class CalibrationApp {
         std::to_string(config_.ignore_planes.size()), 1.5);
     draw_text(125, 265, original_.camera_to_room.matrix == config_.camera_to_room.matrix
         ? "ROOM TRANSFORM: UNCHANGED" : "ROOM TRANSFORM: CHANGED", 1.5);
-    draw_text(125, 295, specter::serialize_config(original_) == specter::serialize_config(config_)
+    draw_text(125, 295, specter::serialize_config(specter::AppConfig{{original_}}) ==
+        specter::serialize_config(specter::AppConfig{{config_}})
         ? "CONTENT: NO CHANGES" : "CONTENT: MODIFIED", 1.5);
     draw_button(125, height - 175, 360, 35, "ATOMICALLY REPLACE CONFIG", true);
     draw_button(510, height - 175, 180, 35, "CANCEL", false, true);
   }
 
   Options options_;
-  specter::AppConfig config_;
-  specter::AppConfig original_;
+  specter::AppConfig app_config_;
+  std::size_t sensor_index_{};
+  specter::SensorConfig config_;
+  specter::SensorConfig original_;
   std::unique_ptr<specter::OccupancyPipeline> pipeline_;
   std::unique_ptr<specter::FrameSource> source_;
   GLFWwindow* window_{};
@@ -1513,8 +1524,8 @@ class CalibrationApp {
   std::vector<specter::TrackState> track_states_;
   std::vector<specter::IgnorePlaneState> ignore_plane_states_;
   std::vector<specter::Point3> ignored_points_;
-  std::vector<specter::AppConfig> undo_, redo_;
-  specter::AppConfig edit_before_;
+  std::vector<specter::SensorConfig> undo_, redo_;
+  specter::SensorConfig edit_before_;
   std::string status_{"STARTING"};
   std::string rename_buffer_;
   bool frozen_{}, left_down_{}, right_down_{}, translating_{}, corner_click_{}, renaming_{}, save_preview_{};

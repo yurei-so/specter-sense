@@ -124,25 +124,36 @@ class Tray:
                     for line in stream:
                         message = json.loads(line)
                         snapshot = message.get("state", {})
-                        sensor = snapshot.get("sensor", {})
-                        status = sensor.get("status", "unknown")
-                        zones = snapshot.get("zones", {})
-                        occupied = [name for name, zone in zones.items() if zone.get("occupied")]
-                        if status == "streaming":
+                        sensors = snapshot.get("sensors", {})
+                        statuses = {
+                            name: sensor.get("health", {}).get("status", "unknown")
+                            for name, sensor in sensors.items()
+                        }
+                        occupied = [
+                            f"{sensor_name}/{zone_name}"
+                            for sensor_name, sensor in sensors.items()
+                            for zone_name, zone in sensor.get("zones", {}).items()
+                            if zone.get("occupied")
+                        ]
+                        unhealthy = [f"{name}: {status.replace('_', ' ')}"
+                                     for name, status in statuses.items() if status != "streaming"]
+                        if sensors and not unhealthy:
                             state = "occupied" if occupied else "clear"
                             detail = "Occupied: " + ", ".join(occupied) if occupied else "Streaming; all zones clear"
                             plane_activity = []
-                            for name, plane in snapshot.get("ignore_planes", {}).items():
-                                threshold = plane.get("noise_threshold_points")
-                                if threshold is None or not plane.get("enabled", False):
-                                    continue
-                                activity = int(plane.get("activity_points", 0))
-                                disposition = "passing" if activity > threshold else "suppressed"
-                                plane_activity.append(f"{name} {activity}/{threshold} {disposition}")
+                            for sensor_name, sensor in sensors.items():
+                                for name, plane in sensor.get("ignore_planes", {}).items():
+                                    threshold = plane.get("noise_threshold_points")
+                                    if threshold is None or not plane.get("enabled", False):
+                                        continue
+                                    activity = int(plane.get("activity_points", 0))
+                                    disposition = "passing" if activity > threshold else "suppressed"
+                                    plane_activity.append(
+                                        f"{sensor_name}/{name} {activity}/{threshold} {disposition}")
                             if plane_activity:
                                 detail += "; planes: " + ", ".join(plane_activity)
                         else:
-                            state, detail = "warning", f"Sensor {status.replace('_', ' ')}"
+                            state, detail = "warning", "; ".join(unhealthy) if unhealthy else "No sensors configured"
                         self.bridge.changed.emit(state, detail)
             except (FileNotFoundError, ConnectionError, OSError, json.JSONDecodeError):
                 self.bridge.changed.emit("warning", "Service active; waiting for sensor socket")

@@ -31,17 +31,19 @@ boost::json::value optional_number(const std::optional<double>& value) {
 
 boost::json::value snapshot_to_json(const Snapshot& snapshot) {
   boost::json::object root;
-  root["schema_version"] = 1;
+  root["schema_version"] = 2;
   root["generated_at"] = timestamp(snapshot.generated_at);
-  root["last_valid_frame_at"] = snapshot.last_valid_frame_at
-      ? boost::json::value(timestamp(*snapshot.last_valid_frame_at)) : boost::json::value(nullptr);
-  root["sensor"] = {
-      {"connected", snapshot.sensor.connected},
-      {"reconnecting", snapshot.sensor.reconnecting},
-      {"status", snapshot.sensor.status}};
-  boost::json::object zones;
+  boost::json::object sensors;
   const auto generated = snapshot.generated_at;
-  for (const auto& zone : snapshot.zones) {
+  for (const auto& [sensor_name, snapshot] : snapshot.sensors) {
+    boost::json::object sensor;
+    sensor["last_valid_frame_at"] = snapshot.last_valid_frame_at
+        ? boost::json::value(timestamp(*snapshot.last_valid_frame_at)) : boost::json::value(nullptr);
+    sensor["health"] = {{"connected", snapshot.sensor.connected},
+                         {"reconnecting", snapshot.sensor.reconnecting},
+                         {"status", snapshot.sensor.status}};
+    boost::json::object zones;
+    for (const auto& zone : snapshot.zones) {
     const auto age = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(generated - zone.observed_at).count());
     boost::json::object item{
         {"occupied", zone.occupied},
@@ -57,10 +59,10 @@ boost::json::value snapshot_to_json(const Snapshot& snapshot) {
       item["centroid_m"] = nullptr;
     }
     zones[zone.name] = std::move(item);
-  }
-  root["zones"] = std::move(zones);
-  boost::json::object tracks;
-  for (const auto& track : snapshot.tracks) {
+    }
+    sensor["zones"] = std::move(zones);
+    boost::json::object tracks;
+    for (const auto& track : snapshot.tracks) {
     const auto age = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
         generated - track.observed_at).count());
     boost::json::array track_zones;
@@ -79,10 +81,10 @@ boost::json::value snapshot_to_json(const Snapshot& snapshot) {
         {"occluded", track.occluded},
         {"observed_at", timestamp(track.observed_at)},
         {"age_ms", age}};
-  }
-  root["tracks"] = std::move(tracks);
-  boost::json::object ignore_planes;
-  for (const auto& plane : snapshot.ignore_planes) {
+    }
+    sensor["tracks"] = std::move(tracks);
+    boost::json::object ignore_planes;
+    for (const auto& plane : snapshot.ignore_planes) {
     boost::json::object state{{"enabled", plane.enabled},
                               {"matched_points", plane.matched_points},
                               {"activity_points", plane.activity_points},
@@ -90,8 +92,11 @@ boost::json::value snapshot_to_json(const Snapshot& snapshot) {
     state["noise_threshold_points"] = plane.noise_threshold_points
         ? boost::json::value(*plane.noise_threshold_points) : boost::json::value(nullptr);
     ignore_planes[plane.name] = std::move(state);
+    }
+    sensor["ignore_planes"] = std::move(ignore_planes);
+    sensors[sensor_name] = std::move(sensor);
   }
-  root["ignore_planes"] = std::move(ignore_planes);
+  root["sensors"] = std::move(sensors);
   return root;
 }
 

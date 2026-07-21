@@ -2,6 +2,7 @@
 
 #include <boost/json.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <cmath>
 #include <iomanip>
@@ -70,13 +71,11 @@ double length(Point3 value) { return std::sqrt(dot(value, value)); }
 
 }  // namespace
 
-AppConfig load_config(const std::filesystem::path& path) {
-  std::ifstream input(path);
-  if (!input) throw std::runtime_error("cannot open config: " + path.string());
-  const std::string text((std::istreambuf_iterator<char>(input)), {});
-  const auto root = boost::json::parse(text).as_object();
-
-  AppConfig config;
+SensorConfig parse_sensor(const boost::json::object& root) {
+  SensorConfig config;
+  config.name = root.at("name").as_string().c_str();
+  config.source = root.at("source").as_string().c_str();
+  if (const auto* serial = root.if_contains("serial")) config.serial = serial->as_string().c_str();
   const auto& transform = root.at("camera_to_room").as_array();
   if (transform.size() != 16) throw std::runtime_error("camera_to_room must contain 16 numbers");
   for (std::size_t i = 0; i < 16; ++i) {
@@ -144,11 +143,10 @@ AppConfig load_config(const std::filesystem::path& path) {
     }
     config.zones.push_back(std::move(zone));
   }
-  validate_config(config);
   return config;
 }
 
-void validate_config(const AppConfig& config) {
+void validate_sensor(const SensorConfig& config) {
   const auto& p = config.processing;
   for (const auto value : config.camera_to_room.matrix)
     if (!std::isfinite(value)) throw std::runtime_error("camera_to_room contains a non-finite value");
@@ -241,8 +239,40 @@ void validate_config(const AppConfig& config) {
   }
 }
 
-std::string serialize_config(const AppConfig& config) {
+AppConfig load_config(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  if (!input) throw std::runtime_error("cannot open config: " + path.string());
+  const std::string text((std::istreambuf_iterator<char>(input)), {});
+  const auto root = boost::json::parse(text).as_object();
+  AppConfig config;
+  for (const auto& value : root.at("sensors").as_array()) config.sensors.push_back(parse_sensor(value.as_object()));
   validate_config(config);
+  return config;
+}
+
+void validate_config(const AppConfig& config) {
+  if (config.sensors.empty()) throw std::runtime_error("at least one sensor is required");
+  const auto kinect_count = std::count_if(config.sensors.begin(), config.sensors.end(),
+      [](const auto& sensor) { return sensor.source == "kinect"; });
+  std::set<std::string> names;
+  std::set<std::string> serials;
+  for (const auto& sensor : config.sensors) {
+    if (sensor.name.empty()) throw std::runtime_error("sensor name cannot be empty");
+    if (!names.insert(sensor.name).second) throw std::runtime_error("duplicate sensor name: " + sensor.name);
+    if (sensor.source != "synthetic" && sensor.source != "kinect")
+      throw std::runtime_error("sensor " + sensor.name + " has unknown source: " + sensor.source);
+    if (sensor.serial && sensor.serial->empty()) throw std::runtime_error("sensor " + sensor.name + " serial cannot be empty");
+    if (sensor.source != "kinect" && sensor.serial)
+      throw std::runtime_error("sensor " + sensor.name + " serial is only valid for a kinect source");
+    if (sensor.source == "kinect" && kinect_count > 1 && !sensor.serial)
+      throw std::runtime_error("sensor " + sensor.name + " requires a serial when multiple Kinect sensors are configured");
+    if (sensor.serial && !serials.insert(*sensor.serial).second)
+      throw std::runtime_error("duplicate sensor serial: " + *sensor.serial);
+    validate_sensor(sensor);
+  }
+}
+
+boost::json::object serialize_sensor(const SensorConfig& config) {
   boost::json::array transform;
   for (const auto value : config.camera_to_room.matrix) transform.push_back(value);
   boost::json::object processing{
@@ -287,12 +317,23 @@ std::string serialize_config(const AppConfig& config) {
         {"enter_after_ms", zone.enter_after.count()},
         {"exit_after_ms", zone.exit_after.count()}});
   }
-  return boost::json::serialize(boost::json::object{
+  boost::json::object result{
+      {"name", config.name},
+      {"source", config.source},
       {"camera_to_room", std::move(transform)},
       {"processing", std::move(processing)},
       {"tracking", std::move(tracking)},
       {"ignore_planes", std::move(ignore_planes)},
-      {"zones", std::move(zones)}}) + "\n";
+      {"zones", std::move(zones)}};
+  if (config.serial) result["serial"] = *config.serial;
+  return result;
+}
+
+std::string serialize_config(const AppConfig& config) {
+  validate_config(config);
+  boost::json::array sensors;
+  for (const auto& sensor : config.sensors) sensors.push_back(serialize_sensor(sensor));
+  return boost::json::serialize(boost::json::object{{"sensors", std::move(sensors)}}) + "\n";
 }
 
 void save_config_atomic(const std::filesystem::path& path, const AppConfig& config) {

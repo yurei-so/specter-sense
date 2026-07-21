@@ -51,14 +51,15 @@ cp .env.example .env
 ./build/specter-sense --frames 120
 ```
 
-The active source, room configuration, socket, and optional state output live in the ignored `.env` file. Command-line options remain available for one-off overrides and take precedence over `.env`. Set `SPECTER_SENSE_ENV=/path/to/file` to use a different environment file. Omit `--frames` to run until `SIGINT` or `SIGTERM`.
+All sensor identity, source, calibration, and processing information lives in the JSON configuration. The ignored `.env` only selects that config and process-level outputs. Command-line options remain available for one-off process overrides and take precedence over `.env`. Set `SPECTER_SENSE_ENV=/path/to/file` to use a different environment file. Omit `--frames` to run until `SIGINT` or `SIGTERM`.
 
 ## Run with Kinect V2
 
 ```sh
 cp config/specter-sense.example.json config/specter-sense.local.json
 cp .env.example .env
-# Edit .env: select kinect and config/specter-sense.local.json.
+# Edit the JSON sensor entry to use source "kinect" and set its hardware serial.
+# Point SPECTER_SENSE_CONFIG in .env at config/specter-sense.local.json.
 ./build/specter-sense
 ```
 
@@ -98,7 +99,7 @@ LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib \
   ./build/specter-sense-calibrate
 ```
 
-Use `--source synthetic` to learn the editor without the camera. The utility never requests RGB and does not persist depth frames. The side panel can freeze a representative depth point cloud in memory while geometry is edited.
+Use a configured synthetic sensor to learn the editor without a camera. When multiple sensors are configured, select one with `--sensor NAME`; otherwise the first sensor is edited. The utility never requests RGB and does not persist depth frames. The side panel can freeze a representative depth point cloud in memory while geometry is edited.
 
 Object tracking visualization is optional and off by default in the calibrator. Click **Object Tracking Off** in the side panel to enable it, or start with `--object-tracking`. The overlay uses the same runtime clustering, classification, association, and posture pipeline: confirmed tracks appear as colored room-space bounds labeled with their ephemeral ID, class, and posture; coasting tracks remain visible with thinner bounds. Toggling the overlay clears its ephemeral tracks but preserves the learned foreground background, so tracking can restart without another warmup period. This display-only toggle does not change the saved `tracking.enabled` configuration value.
 
@@ -138,6 +139,15 @@ The editor rejects duplicate names, too-small or self-intersecting polygons, adj
 
 See [config/specter-sense.example.json](config/specter-sense.example.json).
 
+The top-level `sensors` array may contain any number of independent sensor entries. Every entry owns the complete former single-sensor configuration:
+
+- `name`: stable unique key used in state output and logs.
+- `source`: `synthetic` or `kinect`.
+- `serial`: optional Kinect V2 hardware serial. It is required on every Kinect entry when more than one Kinect is configured.
+- `camera_to_room`, `processing`, `tracking`, `ignore_planes`, and `zones`: calibration and pipeline state for that sensor.
+
+Each sensor runs in its own acquisition/reconnect worker, so a timeout or reconnect on one sensor does not block the others. To add another sensor, duplicate an entry, give it a unique name and hardware serial, and calibrate it with `specter-sense-calibrate --sensor NAME`.
+
 - `min_depth_m`, `max_depth_m`: reject invalid or irrelevant measurements.
 - `foreground_delta_m`: a valid sample must be this much nearer than its background depth.
 - `background_alpha`: adaptation rate for non-foreground background samples.
@@ -145,7 +155,7 @@ See [config/specter-sense.example.json](config/specter-sense.example.json).
 - `enter_points`, `exit_points`: Schmitt-trigger evidence thresholds; enter must be at least exit.
 - `enter_after_ms`, `exit_after_ms`: sustained evidence/absence required for a state transition. A longer exit delay prevents flicker.
 
-The optional top-level `tracking` object controls anonymous object tracking:
+Each sensor's optional `tracking` object controls anonymous object tracking:
 
 - `enabled`: enable clustering, association, classification, and coarse posture.
 - `voxel_size_m`: room-space clustering resolution. Smaller values preserve detail but are more sensitive to holes.
@@ -156,7 +166,7 @@ The optional top-level `tracking` object controls anonymous object tracking:
 
 When `tracking` is absent, the documented defaults are used. Classification and posture confidence values express strength of geometric evidence, not calibrated probabilities. `unknown` is an expected result for partial views, merged objects, ambiguous sitting/crouching geometry, and shapes outside the conservative rules.
 
-The optional top-level `ignore_planes` array contains rigid bounded rectangles in room coordinates:
+Each sensor's optional `ignore_planes` array contains rigid bounded rectangles in room coordinates:
 
 - `name`: stable unique plane name, such as `wardrobe_mirror`.
 - `enabled`: whether the plane participates in depth rejection.
@@ -182,7 +192,7 @@ If `XDG_RUNTIME_DIR` is unavailable, it falls back to `/tmp/specter-sense-<uid>.
 Each client receives newline-delimited JSON. Connecting immediately produces a complete snapshot:
 
 ```json
-{"type":"snapshot","sequence":12,"state":{"schema_version":1,"sensor":{},"zones":{},"tracks":{}}}
+{"type":"snapshot","sequence":12,"state":{"schema_version":2,"sensors":{"primary":{"health":{},"zones":{},"tracks":{},"ignore_planes":{}}}}}
 ```
 
 The service then emits complete state envelopes with a reason:
@@ -195,9 +205,9 @@ The service then emits complete state envelopes with a reason:
 
 Occupancy and health transitions publish immediately. Observation messages default to 10 Hz so consumers receive current evidence, centroid, and range data without tying updates to disk writes. `sequence` increases monotonically for the lifetime of the process. Clients should reconnect after EOF and treat the next `snapshot` as authoritative.
 
-`tracks` is an additive schema-v1 field keyed by an ephemeral ID such as `track-3`. Each item reports `tracking_state` (`confirmed` or `coasting`), conservative classification and posture labels with confidence, room-space centroid/velocity/bounds, foreground evidence, intersected zone names, occlusion state, and freshness. IDs are meaningful only during the current uninterrupted sensor session and must never be treated as a person identity. Existing v1 consumers may ignore this field.
+Within each sensor, `tracks` is keyed by an ephemeral ID such as `track-3`. Each item reports `tracking_state` (`confirmed` or `coasting`), conservative classification and posture labels with confidence, room-space centroid/velocity/bounds, foreground evidence, intersected zone names, occlusion state, and freshness. IDs are scoped to one configured sensor and meaningful only during its current uninterrupted session.
 
-The additive `ignore_planes` state object reports each configured plane's enabled state, raw geometric `matched_points`, foreground `activity_points`, `rejected_points`, and nullable `noise_threshold_points` in the latest valid frame. Activity monitors compare `activity_points` with the threshold to distinguish noise suppression from object pass-through. It contains derived counters and configuration only—never image or depth-frame data.
+Each sensor's `ignore_planes` state object reports each configured plane's enabled state, raw geometric `matched_points`, foreground `activity_points`, `rejected_points`, and nullable `noise_threshold_points` in the latest valid frame. Activity monitors compare `activity_points` with the threshold to distinguish noise suppression from object pass-through. It contains derived counters and configuration only—never image or depth-frame data.
 
 Inspect the stream from a terminal:
 
@@ -253,16 +263,13 @@ The service does not write state to disk by default. Pass `--output PATH` when a
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "2026-07-19T20:00:00.000Z",
-  "last_valid_frame_at": "2026-07-19T20:00:00.000Z",
-  "sensor": {
-    "connected": true,
-    "reconnecting": false,
-    "status": "streaming"
-  },
-  "zones": {
-    "desk": {
+  "sensors": {
+    "primary": {
+      "last_valid_frame_at": "2026-07-19T20:00:00.000Z",
+      "health": {"connected": true, "reconnecting": false, "status": "streaming"},
+      "zones": {"desk": {
       "occupied": true,
       "occupancy_score": 0.87,
       "foreground_points": 1234,
@@ -271,10 +278,8 @@ The service does not write state to disk by default. Pass `--output PATH` when a
       "nearest_range_m": 1.18,
       "farthest_range_m": 1.91,
       "centroid_m": {"x": 0.42, "y": 1.55, "z": 0.83}
-    }
-  },
-  "tracks": {
-    "track-3": {
+      }},
+      "tracks": {"track-3": {
       "tracking_state": "confirmed",
       "classification": "likely_human",
       "classification_confidence": 0.82,
@@ -288,12 +293,14 @@ The service does not write state to disk by default. Pass `--output PATH` when a
       "occluded": false,
       "observed_at": "2026-07-20T20:00:00.000Z",
       "age_ms": 0
+      }},
+      "ignore_planes": {}
     }
   }
 }
 ```
 
-`occupancy_score` is explicitly not a probability. It is the observed foreground-point count divided by `enter_points`, capped at 1. Range values are camera ranges; centroids, velocities, and bounds are in room coordinates/metres. Consumers must check sensor health and freshness rather than trusting stale zone or track state.
+`occupancy_score` is explicitly not a probability. It is the observed foreground-point count divided by `enter_points`, capped at 1. Range values are camera ranges; centroids, velocities, and bounds are in room coordinates/metres. Consumers must check each sensor's health and freshness rather than trusting stale zone or track state.
 
 ## Privacy and debug policy
 

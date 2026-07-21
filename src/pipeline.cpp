@@ -80,7 +80,7 @@ std::pair<std::string, double> infer_posture(const Point3& bounds, double minimu
 }
 
 std::vector<ClusterObservation> cluster_points(
-    const std::vector<Point3>& points, const AppConfig& config) {
+    const std::vector<Point3>& points, const SensorConfig& config) {
   std::map<VoxelKey, Voxel> voxels;
   const double size = config.tracking.voxel_size_m;
   for (const auto& point : points) {
@@ -251,10 +251,10 @@ std::optional<double> ray_ignore_plane_intersection(
   return parameter;
 }
 
-OccupancyPipeline::OccupancyPipeline(AppConfig config, bool retain_foreground_points)
+OccupancyPipeline::OccupancyPipeline(SensorConfig config, bool retain_foreground_points)
     : config_(std::move(config)), runtime_(config_.zones.size()),
       retain_foreground_points_(retain_foreground_points), tracking_enabled_(config_.tracking.enabled) {
-  validate_config(config_);
+  validate_sensor(config_);
 }
 
 void OccupancyPipeline::rebuild_ignore_rays(const DepthFrame& frame) {
@@ -532,7 +532,7 @@ void OccupancyPipeline::set_tracking_enabled(bool enabled) {
 void OccupancyPipeline::set_ignore_planes(std::vector<IgnorePlaneConfig> planes) {
   auto candidate = config_;
   candidate.ignore_planes = std::move(planes);
-  validate_config(candidate);
+  validate_sensor(candidate);
   config_.ignore_planes = std::move(candidate.ignore_planes);
   ignore_rays_.clear();
   last_ignore_plane_states_.clear();

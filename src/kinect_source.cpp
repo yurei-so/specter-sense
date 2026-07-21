@@ -11,9 +11,9 @@ namespace {
 
 class KinectSource final : public FrameSource {
  public:
-  KinectSource() : listener_(libfreenect2::Frame::Depth) {
+  explicit KinectSource(const std::optional<std::string>& serial) : listener_(libfreenect2::Frame::Depth) {
     if (freenect2_.enumerateDevices() == 0) throw std::runtime_error("no Kinect V2 found");
-    device_ = freenect2_.openDefaultDevice();
+    device_ = serial ? freenect2_.openDevice(*serial) : freenect2_.openDefaultDevice();
     if (!device_) throw std::runtime_error("failed to open Kinect V2");
     device_->setIrAndDepthFrameListener(&listener_);
     if (!device_->startStreams(false, true)) throw std::runtime_error("failed to start Kinect depth stream");
@@ -54,8 +54,8 @@ class KinectSource final : public FrameSource {
 
 }  // namespace
 
-std::unique_ptr<FrameSource> make_kinect_source() {
-  return std::make_unique<KinectSource>();
+std::unique_ptr<FrameSource> make_kinect_source(const std::optional<std::string>& serial) {
+  return std::make_unique<KinectSource>(serial);
 }
 
 }  // namespace specter
