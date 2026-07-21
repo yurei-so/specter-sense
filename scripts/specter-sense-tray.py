@@ -136,9 +136,9 @@ class Tray:
                                 threshold = plane.get("noise_threshold_points")
                                 if threshold is None or not plane.get("enabled", False):
                                     continue
-                                matched = int(plane.get("matched_points", 0))
-                                disposition = "passing" if matched > threshold else "suppressed"
-                                plane_activity.append(f"{name} {matched}/{threshold} {disposition}")
+                                activity = int(plane.get("activity_points", 0))
+                                disposition = "passing" if activity > threshold else "suppressed"
+                                plane_activity.append(f"{name} {activity}/{threshold} {disposition}")
                             if plane_activity:
                                 detail += "; planes: " + ", ".join(plane_activity)
                         else:

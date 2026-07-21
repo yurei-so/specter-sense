@@ -208,10 +208,14 @@ void ignore_plane_pipeline_test() {
   specter::OccupancyPipeline thresholded(thresholded_config, true);
   thresholded.process(scene(4000));
   thresholded.process(scene(4000));
+  require(thresholded.last_ignore_plane_states()[0].matched_points > 0 &&
+              thresholded.last_ignore_plane_states()[0].activity_points == 0 &&
+              thresholded.last_ignore_plane_states()[0].rejected_points == 0,
+          "static behind-plane background inflated threshold activity");
   const auto thresholded_states = thresholded.process(reflected);
   require(thresholded.last_ignore_plane_states()[0].rejected_points == 0,
           "above-threshold plane evidence was partially rejected");
-  require(thresholded.last_ignore_plane_states()[0].matched_points > 0,
+  require(thresholded.last_ignore_plane_states()[0].activity_points > 0,
           "above-threshold plane activity was not reported");
   require(thresholded.last_ignore_plane_states()[0].noise_threshold_points == 0,
           "plane activity diagnostics omitted sensitivity");
@@ -222,7 +226,7 @@ void ignore_plane_pipeline_test() {
   thresholded.process(reflected);
   require(thresholded.last_ignore_plane_states()[0].rejected_points > 0,
           "below-threshold plane noise was not rejected");
-  require(thresholded.last_ignore_plane_states()[0].matched_points ==
+  require(thresholded.last_ignore_plane_states()[0].activity_points ==
               thresholded.last_ignore_plane_states()[0].rejected_points,
           "suppressed plane activity counters disagree");
 
@@ -385,7 +389,7 @@ void json_test() {
   snapshot.tracks = {{"track-7", "confirmed", "likely_human", 0.8, "standing", 0.7,
                       {1, 2, 0.9}, {0.1, 0, 0}, {0.5, 0.4, 1.7}, 500, {"desk"}, false,
                       snapshot.generated_at}};
-  snapshot.ignore_planes = {{"mirror", true, 321, 456, 500}};
+  snapshot.ignore_planes = {{"mirror", true, 321, 456, 123, 500}};
   const auto json = specter::snapshot_to_json(snapshot).as_object();
   require(json.at("schema_version").as_int64() == 1, "schema version mismatch");
   require(json.at("zones").as_object().at("desk").as_object().at("occupied").as_bool(), "zone JSON mismatch");
@@ -396,6 +400,8 @@ void json_test() {
           "ignore plane diagnostics JSON mismatch");
   require(json.at("ignore_planes").as_object().at("mirror").as_object().at("matched_points").to_number<std::size_t>() == 456,
           "ignore plane matched activity JSON mismatch");
+  require(json.at("ignore_planes").as_object().at("mirror").as_object().at("activity_points").to_number<std::size_t>() == 123,
+          "ignore plane foreground activity JSON mismatch");
   require(json.at("ignore_planes").as_object().at("mirror").as_object().at("noise_threshold_points").to_number<std::size_t>() == 500,
           "ignore plane sensitivity JSON mismatch");
 }

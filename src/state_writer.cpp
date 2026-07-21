@@ -85,6 +85,7 @@ boost::json::value snapshot_to_json(const Snapshot& snapshot) {
   for (const auto& plane : snapshot.ignore_planes) {
     boost::json::object state{{"enabled", plane.enabled},
                               {"matched_points", plane.matched_points},
+                              {"activity_points", plane.activity_points},
                               {"rejected_points", plane.rejected_points}};
     state["noise_threshold_points"] = plane.noise_threshold_points
         ? boost::json::value(*plane.noise_threshold_points) : boost::json::value(nullptr);

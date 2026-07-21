@@ -1360,10 +1360,11 @@ class CalibrationApp {
       draw_text(x, y, std::string("STATE: ") + (plane.enabled ? "ENABLED" : "DISABLED"), 1.2); y += 20;
       if (static_cast<std::size_t>(selected_plane_) < ignore_plane_states_.size()) {
         const auto& state = ignore_plane_states_[static_cast<std::size_t>(selected_plane_)];
-        draw_text(x, y, "MATCHED: " + std::to_string(state.matched_points) + " PTS", 1.2); y += 20;
+        draw_text(x, y, (plane.noise_threshold_points ? "ACTIVITY: " : "RAW MATCHES: ") +
+            std::to_string(plane.noise_threshold_points ? state.activity_points : state.matched_points) + " PTS", 1.2); y += 20;
         draw_text(x, y, "REJECTED: " + std::to_string(state.rejected_points) + " PTS", 1.2); y += 20;
         if (plane.noise_threshold_points) {
-          const bool passing = state.matched_points > *plane.noise_threshold_points;
+          const bool passing = state.activity_points > *plane.noise_threshold_points;
           glColor3f(passing ? 1.0F : 0.35F, passing ? 0.65F : 0.85F, 0.2F);
           draw_text(x, y, passing ? "SENSITIVITY: ACTIVITY PASSING" : "SENSITIVITY: NOISE SUPPRESSED", 1.05);
           y += 20;

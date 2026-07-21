@@ -304,10 +304,10 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
   last_ignore_plane_states_.clear();
   for (const auto& plane : config_.ignore_planes)
     last_ignore_plane_states_.push_back(
-        {plane.name, plane.enabled, 0, 0, plane.noise_threshold_points});
+        {plane.name, plane.enabled, 0, 0, 0, plane.noise_threshold_points});
   const auto& p = config_.processing;
 
-  std::vector<std::size_t> plane_matches(config_.ignore_planes.size());
+  std::vector<std::size_t> plane_activity(config_.ignore_planes.size());
   if (std::any_of(config_.ignore_planes.begin(), config_.ignore_planes.end(),
                   [](const auto& plane) { return plane.noise_threshold_points.has_value(); }))
     for (std::size_t index = 0; index < frame.depth_mm.size(); ++index) {
@@ -315,9 +315,15 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
       if (!std::isfinite(depth_m) || depth_m < p.min_depth_m || depth_m > p.max_depth_m) continue;
       const auto& ignore = ignore_rays_[index];
       if (ignore.plane_index < config_.ignore_planes.size() &&
-          depth_m >= ignore.depth_m - config_.ignore_planes[ignore.plane_index].surface_tolerance_m)
-        ++plane_matches[ignore.plane_index];
+          config_.ignore_planes[ignore.plane_index].noise_threshold_points &&
+          depth_m >= ignore.depth_m - config_.ignore_planes[ignore.plane_index].surface_tolerance_m &&
+          std::isfinite(background_m_[index]) && frames_seen_ >= p.warmup_frames &&
+          static_cast<double>(background_m_[index]) - depth_m >= p.foreground_delta_m)
+        ++plane_activity[ignore.plane_index];
     }
+
+  for (std::size_t plane_index = 0; plane_index < plane_activity.size(); ++plane_index)
+    last_ignore_plane_states_[plane_index].activity_points = plane_activity[plane_index];
 
   for (std::size_t index = 0; index < frame.depth_mm.size(); ++index) {
     const double depth_m = static_cast<double>(frame.depth_mm[index]) / 1000.0;
@@ -325,11 +331,15 @@ std::vector<ZoneState> OccupancyPipeline::process(const DepthFrame& frame) {
     const auto& ignore = ignore_rays_[index];
     if (ignore.plane_index < config_.ignore_planes.size()) {
       const auto& plane = config_.ignore_planes[ignore.plane_index];
-      const bool reject_plane = !plane.noise_threshold_points ||
-                                plane_matches[ignore.plane_index] <= *plane.noise_threshold_points;
       if (depth_m >= ignore.depth_m - plane.surface_tolerance_m) {
         ++last_ignore_plane_states_[ignore.plane_index].matched_points;
-        if (reject_plane) {
+        const bool foreground_activity = std::isfinite(background_m_[index]) &&
+            frames_seen_ >= p.warmup_frames &&
+            static_cast<double>(background_m_[index]) - depth_m >= p.foreground_delta_m;
+        const bool reject_sample = !plane.noise_threshold_points ||
+            (foreground_activity &&
+             plane_activity[ignore.plane_index] <= *plane.noise_threshold_points);
+        if (reject_sample) {
           ++last_ignore_plane_states_[ignore.plane_index].rejected_points;
           if (retain_foreground_points_) {
             const double u = static_cast<double>(index % frame.width);

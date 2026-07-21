@@ -127,6 +127,7 @@ struct IgnorePlaneState {
   bool enabled{};
   std::size_t rejected_points{};
   std::size_t matched_points{};
+  std::size_t activity_points{};
   std::optional<std::size_t> noise_threshold_points;
 };
 
