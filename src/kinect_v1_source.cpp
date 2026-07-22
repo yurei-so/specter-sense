@@ -103,4 +103,20 @@ std::unique_ptr<FrameSource> make_kinect_v1_source(const std::optional<std::stri
   return std::make_unique<KinectV1Source>(serial);
 }
 
+std::vector<DiscoveredSensor> discover_kinect_v1_sensors() {
+  freenect_context* context = nullptr;
+  if (freenect_init(&context, nullptr) < 0) throw std::runtime_error("failed to initialize Kinect V1 discovery");
+  freenect_select_subdevices(context, FREENECT_DEVICE_CAMERA);
+  freenect_device_attributes* attributes = nullptr;
+  const int count = freenect_list_device_attributes(context, &attributes);
+  std::vector<DiscoveredSensor> sensors;
+  for (auto* item = attributes; item; item = item->next)
+    sensors.push_back({"kinect-v1", item->camera_serial && *item->camera_serial
+          ? std::optional<std::string>(item->camera_serial) : std::nullopt});
+  freenect_free_device_attributes(attributes);
+  freenect_shutdown(context);
+  if (count < 0) throw std::runtime_error("Kinect V1 discovery failed");
+  return sensors;
+}
+
 }  // namespace specter

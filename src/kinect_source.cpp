@@ -58,4 +58,13 @@ std::unique_ptr<FrameSource> make_kinect_v2_source(const std::optional<std::stri
   return std::make_unique<KinectSource>(serial);
 }
 
+std::vector<DiscoveredSensor> discover_kinect_v2_sensors() {
+  libfreenect2::Freenect2 context;
+  std::vector<DiscoveredSensor> sensors;
+  const int count = context.enumerateDevices();
+  for (int index = 0; index < count; ++index)
+    sensors.push_back({"kinect-v2", context.getDeviceSerialNumber(index)});
+  return sensors;
+}
+
 }  // namespace specter

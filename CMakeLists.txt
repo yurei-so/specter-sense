@@ -17,6 +17,7 @@ add_library(specter_sense_core
   src/environment.cpp
   src/pipeline.cpp
   src/socket_publisher.cpp
+  src/sensor_discovery.cpp
   src/state_writer.cpp
   src/synthetic_source.cpp
 )

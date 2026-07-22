@@ -135,6 +135,8 @@ Viewport and editing controls:
 - `Ctrl+N`: create a new bounding box
 - `Ctrl+M`: create a new bounded ignore plane facing the calibrated camera
 - **Object Tracking On/Off**: toggle anonymous track bounds and labels without changing saved configuration
+- **Prev / Sensor [source] / Next**: switch the live source and editing context without leaving the calibrator; unsaved edits remain pending and are saved together
+- **Sensor Discovery**: expand the hardware panel, rescan connected Kinect devices, and add an unconfigured sensor without hand-editing JSON. Discovered sensors are added disabled with a fresh transform and copied room-zone geometry; calibrate and explicitly enable them before saving.
 - **3D / Top / Camera**: switch among free room editing, floor-plan editing, and the Kinect's horizontally mirrored depth projection
 - Click the rendered Kinect in 3D or Top view: enter exact Camera view
 - Mouse wheel in Camera view: zoom around the optical axis; the outlined sensor FOV remains visible as a reference
@@ -149,6 +151,7 @@ See [config/specter-sense.example.json](config/specter-sense.example.json).
 The top-level `sensors` array may contain any number of independent sensor entries. Every entry owns the complete former single-sensor configuration:
 
 - `name`: stable unique key used in state output and logs.
+- `enabled`: whether the headless service opens this sensor. The calibrator can still select and operate disabled sensors.
 - `source`: `synthetic`, `kinect-v1`, or `kinect-v2` (`kinect` remains a compatibility alias for V2).
 - `serial`: optional Kinect hardware serial. It is required on every entry when more than one sensor of the same model is configured.
 - `camera_to_room`, `processing`, `tracking`, `ignore_planes`, and `zones`: calibration and pipeline state for that sensor.

@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace specter {
 
@@ -16,12 +17,20 @@ class FrameSource {
   virtual std::string name() const = 0;
 };
 
+struct DiscoveredSensor {
+  std::string source;
+  std::optional<std::string> serial;
+};
+
 std::unique_ptr<FrameSource> make_synthetic_source();
+std::vector<DiscoveredSensor> discover_sensors();
 #ifdef SPECTER_SENSE_HAS_KINECT_V1
 std::unique_ptr<FrameSource> make_kinect_v1_source(const std::optional<std::string>& serial = std::nullopt);
+std::vector<DiscoveredSensor> discover_kinect_v1_sensors();
 #endif
 #ifdef SPECTER_SENSE_HAS_KINECT_V2
 std::unique_ptr<FrameSource> make_kinect_v2_source(const std::optional<std::string>& serial = std::nullopt);
+std::vector<DiscoveredSensor> discover_kinect_v2_sensors();
 #endif
 
 }  // namespace specter

@@ -136,6 +136,7 @@ class CalibrationApp {
  public:
   explicit CalibrationApp(Options options)
       : options_(std::move(options)), app_config_(specter::load_config(options_.config)),
+        saved_config_(app_config_),
         sensor_index_(select_sensor(app_config_, options_.sensor)), config_(app_config_.sensors[sensor_index_]),
         original_(config_), pipeline_(std::make_unique<specter::OccupancyPipeline>(config_, true)),
         object_tracking_(options_.object_tracking) {
@@ -215,6 +216,106 @@ class CalibrationApp {
 #endif
     else throw std::runtime_error("unknown source: " + config_.source);
     status_ = "CONNECTED TO " + source_->name();
+    if (window_) glfwSetWindowTitle(window_, ("specter-sense calibration - " + config_.name).c_str());
+  }
+
+  void switch_sensor(std::size_t index) {
+    if (index == sensor_index_ || index >= app_config_.sensors.size()) return;
+    app_config_.sensors[sensor_index_] = config_;
+    source_.reset();
+    sensor_index_ = index;
+    config_ = app_config_.sensors[sensor_index_];
+    original_ = sensor_index_ < saved_config_.sensors.size()
+        ? saved_config_.sensors[sensor_index_] : config_;
+    pipeline_ = std::make_unique<specter::OccupancyPipeline>(config_, true);
+    pipeline_->set_tracking_enabled(object_tracking_);
+    frame_.reset();
+    camera_points_.clear();
+    room_points_.clear();
+    foreground_points_.clear();
+    track_states_.clear();
+    ignore_plane_states_.clear();
+    ignored_points_.clear();
+    undo_.clear();
+    redo_.clear();
+    frozen_ = false;
+    selected_ = config_.zones.empty() ? -1 : 0;
+    selected_vertex_ = -1;
+    selected_plane_ = -1;
+    selected_plane_corner_ = -1;
+    try {
+      connect_source();
+      status_ = "SENSOR " + config_.name + " - " + source_->name();
+    } catch (const std::exception& error) {
+      source_.reset();
+      status_ = "SENSOR " + config_.name + ": " + error.what();
+      if (window_) glfwSetWindowTitle(window_, ("specter-sense calibration - " + config_.name).c_str());
+    }
+  }
+
+  void select_adjacent_sensor(int direction) {
+    if (app_config_.sensors.size() < 2) return;
+    const auto count = app_config_.sensors.size();
+    const auto next = direction < 0 ? (sensor_index_ + count - 1) % count : (sensor_index_ + 1) % count;
+    switch_sensor(next);
+  }
+
+  static std::string canonical_source(const std::string& source) {
+    return source == "kinect" ? "kinect-v2" : source;
+  }
+
+  bool is_configured(const specter::DiscoveredSensor& discovered) const {
+    return std::any_of(app_config_.sensors.begin(), app_config_.sensors.end(), [&](const auto& configured) {
+      if (canonical_source(configured.source) != discovered.source) return false;
+      return configured.serial && discovered.serial ? configured.serial == discovered.serial
+                                                     : !configured.serial;
+    });
+  }
+
+  void refresh_discovery() {
+    source_.reset();
+    std::string result;
+    try {
+      discovered_sensors_ = specter::discover_sensors();
+      result = "DISCOVERED " + std::to_string(discovered_sensors_.size()) + " SENSOR(S)";
+    } catch (const std::exception& error) {
+      discovered_sensors_.clear();
+      result = std::string("DISCOVERY FAILED: ") + error.what();
+    }
+    try {
+      connect_source();
+    } catch (const std::exception& error) {
+      source_.reset();
+      result += std::string("; RECONNECT FAILED: ") + error.what();
+    }
+    status_ = std::move(result);
+  }
+
+  void add_discovered_sensor(const specter::DiscoveredSensor& discovered) {
+    if (is_configured(discovered)) return;
+    specter::SensorConfig added;
+    added.enabled = false;
+    added.source = discovered.source;
+    added.serial = discovered.serial;
+    added.zones = config_.zones;
+    const std::string base = discovered.source;
+    added.name = base;
+    std::size_t suffix = 2;
+    while (std::any_of(app_config_.sensors.begin(), app_config_.sensors.end(),
+                       [&](const auto& sensor) { return sensor.name == added.name; }))
+      added.name = base + "-" + std::to_string(suffix++);
+    specter::validate_sensor(added);
+    app_config_.sensors.push_back(std::move(added));
+    const auto added_index = app_config_.sensors.size() - 1;
+    discovery_expanded_ = false;
+    switch_sensor(added_index);
+    status_ = "ADDED " + config_.name + " DISABLED - CALIBRATE BEFORE ENABLING";
+  }
+
+  void toggle_current_sensor() {
+    config_.enabled = !config_.enabled;
+    app_config_.sensors[sensor_index_] = config_;
+    status_ = config_.enabled ? "SENSOR ENABLED - SAVE TO APPLY" : "SENSOR DISABLED - SAVE TO APPLY";
   }
 
   void acquire() {
@@ -864,6 +965,7 @@ class CalibrationApp {
     try {
       app_config_.sensors[sensor_index_] = config_;
       specter::save_config_atomic(options_.config, app_config_);
+      saved_config_ = app_config_;
       original_ = config_;
       status_ = "SAVED ATOMICALLY: " + options_.config.string();
     } catch (const std::exception& error) { status_ = std::string("SAVE FAILED: ") + error.what(); }
@@ -889,7 +991,29 @@ class CalibrationApp {
       else if (inside(x, y, left + 145, 316, 135, 30)) renaming_ = false;
       return;
     }
-    if (inside(x, y, left, 88, 94, 30)) view_mode_ = ViewMode::perspective;
+    const double discovery_top = height - 510;
+    if (inside(x, y, left, height - 244, 294, 30)) {
+      discovery_expanded_ = !discovery_expanded_;
+      if (discovery_expanded_) refresh_discovery();
+      return;
+    }
+    if (discovery_expanded_) {
+      if (inside(x, y, left + 256, discovery_top + 8, 38, 26)) discovery_expanded_ = false;
+      else if (inside(x, y, left, discovery_top + 42, 294, 28)) refresh_discovery();
+      else if (inside(x, y, left, discovery_top + 76, 294, 28)) toggle_current_sensor();
+      else {
+        const auto shown = std::min<std::size_t>(3, discovered_sensors_.size());
+        for (std::size_t index = 0; index < shown; ++index)
+          if (inside(x, y, left, discovery_top + 112 + static_cast<double>(index) * 40, 294, 32)) {
+            add_discovered_sensor(discovered_sensors_[index]);
+            break;
+          }
+      }
+      return;
+    }
+    if (inside(x, y, left, height - 206, 58, 28)) select_adjacent_sensor(-1);
+    else if (inside(x, y, left + 236, height - 206, 58, 28)) select_adjacent_sensor(1);
+    else if (inside(x, y, left, 88, 94, 30)) view_mode_ = ViewMode::perspective;
     else if (inside(x, y, left + 100, 88, 94, 30)) view_mode_ = ViewMode::top_down;
     else if (inside(x, y, left + 200, 88, 94, 30)) {
       view_mode_ = ViewMode::camera;
@@ -996,7 +1120,8 @@ class CalibrationApp {
 
   void validate_for_preview() {
     try {
-      specter::validate_sensor(config_);
+      app_config_.sensors[sensor_index_] = config_;
+      specter::validate_config(app_config_);
       save_preview_ = true;
       status_ = "SAVE PREVIEW VALID - ENTER CONFIRMS, ESC CANCELS";
     } catch (const std::exception& error) { status_ = std::string("CANNOT SAVE: ") + error.what(); }
@@ -1410,6 +1535,12 @@ class CalibrationApp {
       draw_stepper(x, 502, "EXIT DELAY", std::to_string(zone.exit_after.count()) + " MS");
     } else { glColor3f(0.7F, 0.7F, 0.72F); draw_text(x, y, "NO ZONE SELECTED", 1.5); }
     glColor3f(0.62F, 0.68F, 0.75F);
+    draw_button(x, height - 244, 294, 30,
+                discovery_expanded_ ? "HIDE SENSOR DISCOVERY" : "SENSOR DISCOVERY", discovery_expanded_);
+    draw_button(x, height - 206, 58, 28, "PREV", false);
+    draw_button(x + 64, height - 206, 166, 28,
+                config_.name.substr(0, 7) + " [" + config_.source + "]" + (config_.enabled ? "" : " OFF"), true);
+    draw_button(x + 236, height - 206, 58, 28, "NEXT", false);
     draw_button(x, height - 168, 294, 30,
                 object_tracking_ ? "OBJECT TRACKING ON  " + std::to_string(track_states_.size())
                                  : "OBJECT TRACKING OFF",
@@ -1419,7 +1550,37 @@ class CalibrationApp {
     draw_text(x, height - 86, camera_view() ? "DRAG CORNERS  WHEEL ZOOM" :
                                              "LEFT ORBIT  RIGHT PAN  WHEEL ZOOM", 1.05);
     draw_button(x, height - 52, 294, 34, "REVIEW AND SAVE", false);
+    if (discovery_expanded_) draw_discovery_panel(x, height);
     if (save_preview_) draw_save_preview(width, height);
+  }
+
+  void draw_discovery_panel(double x, int height) {
+    const double top = height - 510;
+    glColor4f(0.045F, 0.055F, 0.075F, 1.0F);
+    glBegin(GL_QUADS);
+    glVertex2d(x - 8, top); glVertex2d(x + 302, top);
+    glVertex2d(x + 302, height - 250); glVertex2d(x - 8, height - 250);
+    glEnd();
+    glColor3f(0.75F, 0.9F, 1.0F); draw_text(x, top + 12, "SENSOR DISCOVERY", 1.45);
+    draw_button(x + 256, top + 8, 38, 26, "X", false);
+    draw_button(x, top + 42, 294, 28, "RESCAN CONNECTED SENSORS", false);
+    draw_button(x, top + 76, 294, 28,
+                config_.enabled ? "DISABLE CURRENT SENSOR" : "ENABLE CURRENT SENSOR", config_.enabled);
+    const auto shown = std::min<std::size_t>(3, discovered_sensors_.size());
+    for (std::size_t index = 0; index < shown; ++index) {
+      const auto& sensor = discovered_sensors_[index];
+      const auto serial = sensor.serial ? sensor.serial->substr(0, 10) : std::string("NO SERIAL");
+      const bool configured = is_configured(sensor);
+      draw_button(x, top + 112 + static_cast<double>(index) * 40, 294, 32,
+                  (configured ? "CONFIGURED " : "ADD ") + sensor.source + " " + serial, configured);
+    }
+    if (discovered_sensors_.empty()) {
+      glColor3f(0.75F, 0.78F, 0.82F); draw_text(x + 8, top + 126, "NO HARDWARE FOUND", 1.2);
+    } else if (discovered_sensors_.size() > shown) {
+      glColor3f(0.75F, 0.78F, 0.82F);
+      draw_text(x + 8, top + 112 + static_cast<double>(shown) * 40,
+                "+ " + std::to_string(discovered_sensors_.size() - shown) + " MORE", 1.1);
+    }
   }
 
   void draw_button(double x, double y, double width, double height, const std::string& label,
@@ -1503,13 +1664,13 @@ class CalibrationApp {
     glColor3f(1, 0.75F, 0.2F); draw_text(125, 125, "CONFIGURATION SAVE PREVIEW", 2.2);
     glColor3f(0.8F, 0.85F, 0.9F);
     draw_text(125, 175, "FILE: " + options_.config.string(), 1.5);
-    draw_text(125, 205, "ZONES: " + std::to_string(original_.zones.size()) + " -> " + std::to_string(config_.zones.size()), 1.5);
-    draw_text(125, 235, "IGNORE PLANES: " + std::to_string(original_.ignore_planes.size()) + " -> " +
+    draw_text(125, 195, "SENSOR: " + config_.name + " [" + config_.source + "]", 1.3);
+    draw_text(125, 225, "ZONES: " + std::to_string(original_.zones.size()) + " -> " + std::to_string(config_.zones.size()), 1.5);
+    draw_text(125, 255, "IGNORE PLANES: " + std::to_string(original_.ignore_planes.size()) + " -> " +
         std::to_string(config_.ignore_planes.size()), 1.5);
-    draw_text(125, 265, original_.camera_to_room.matrix == config_.camera_to_room.matrix
+    draw_text(125, 285, original_.camera_to_room.matrix == config_.camera_to_room.matrix
         ? "ROOM TRANSFORM: UNCHANGED" : "ROOM TRANSFORM: CHANGED", 1.5);
-    draw_text(125, 295, specter::serialize_config(specter::AppConfig{{original_}}) ==
-        specter::serialize_config(specter::AppConfig{{config_}})
+    draw_text(125, 315, specter::serialize_config(saved_config_) == specter::serialize_config(app_config_)
         ? "CONTENT: NO CHANGES" : "CONTENT: MODIFIED", 1.5);
     draw_button(125, height - 175, 360, 35, "ATOMICALLY REPLACE CONFIG", true);
     draw_button(510, height - 175, 180, 35, "CANCEL", false, true);
@@ -1517,6 +1678,7 @@ class CalibrationApp {
 
   Options options_;
   specter::AppConfig app_config_;
+  specter::AppConfig saved_config_;
   std::size_t sensor_index_{};
   specter::SensorConfig config_;
   specter::SensorConfig original_;
@@ -1530,12 +1692,14 @@ class CalibrationApp {
   std::vector<specter::ZoneState> zone_states_;
   std::vector<specter::TrackState> track_states_;
   std::vector<specter::IgnorePlaneState> ignore_plane_states_;
+  std::vector<specter::DiscoveredSensor> discovered_sensors_;
   std::vector<specter::Point3> ignored_points_;
   std::vector<specter::SensorConfig> undo_, redo_;
   specter::SensorConfig edit_before_;
   std::string status_{"STARTING"};
   std::string rename_buffer_;
   bool frozen_{}, left_down_{}, right_down_{}, translating_{}, corner_click_{}, renaming_{}, save_preview_{};
+  bool discovery_expanded_{};
   bool live_validation_{};
   bool object_tracking_{};
   bool editing_plane_{}, plane_corner_dragged_{};

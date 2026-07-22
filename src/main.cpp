@@ -5,6 +5,7 @@
 #include "specter_sense/socket_publisher.hpp"
 #include "specter_sense/state_writer.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -115,7 +116,8 @@ int main(int argc, char** argv) {
     snapshot.generated_at = std::chrono::system_clock::now();
     for (const auto& sensor : config.sensors) {
       specter::SensorSnapshot state;
-      state.sensor = {false, true, "connecting"};
+      state.sensor = sensor.enabled ? specter::SensorState{false, true, "connecting"}
+                                    : specter::SensorState{false, false, "disabled"};
       snapshot.sensors.push_back({sensor.name, std::move(state)});
     }
     std::mutex snapshot_mutex;
@@ -138,7 +140,12 @@ int main(int argc, char** argv) {
     publish_outputs(true);
     if (socket) std::cerr << "{\"event\":\"socket_listening\",\"path\":\"" << socket->path().string() << "\"}\n";
     std::vector<std::thread> workers;
+    const auto enabled_sensor_count = std::count_if(config.sensors.begin(), config.sensors.end(),
+        [](const auto& sensor) { return sensor.enabled; });
+    if (options.frames != 0 && enabled_sensor_count == 0)
+      throw std::runtime_error("--frames requires at least one enabled sensor");
     for (std::size_t sensor_index = 0; sensor_index < config.sensors.size(); ++sensor_index) {
+      if (!config.sensors[sensor_index].enabled) continue;
       workers.emplace_back([&, sensor_index] {
         const auto& sensor_config = config.sensors[sensor_index];
         specter::OccupancyPipeline pipeline(sensor_config);

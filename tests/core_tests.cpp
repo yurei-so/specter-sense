@@ -290,6 +290,7 @@ void config_round_trip_test() {
   const auto text = specter::serialize_config(app_config);
   const auto json = boost::json::parse(text).as_object();
   const auto& sensor = json.at("sensors").as_array().front().as_object();
+  require(sensor.at("enabled").as_bool(), "serialized sensor enabled state mismatch");
   require(sensor.at("camera_to_room").as_array().size() == 16, "serialized transform size mismatch");
   require(sensor.at("zones").as_array().front().as_object().at("name").as_string() == "room",
           "serialized zone mismatch");
@@ -306,6 +307,7 @@ void config_round_trip_test() {
   require(loaded.sensors.size() == 1 && loaded.sensors.front().zones.front().name == "room" &&
               loaded.sensors.front().ignore_planes.size() == 1,
           "atomic config round-trip failed");
+  require(loaded.sensors.front().enabled, "sensor enabled state round-trip failed");
   require(loaded.sensors.front().ignore_planes.front().noise_threshold_points == 42,
           "ignore-plane noise threshold round-trip failed");
 

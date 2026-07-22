@@ -83,6 +83,7 @@ struct IgnorePlaneConfig {
 
 struct SensorConfig {
   std::string name;
+  bool enabled{true};
   std::string source{"synthetic"};
   std::optional<std::string> serial;
   Transform camera_to_room;

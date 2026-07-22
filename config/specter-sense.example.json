@@ -65,7 +65,8 @@
           "enter_after_ms": 250,
           "exit_after_ms": 1000
         }
-      ]
+      ],
+      "enabled": true
     }
   ]
 }

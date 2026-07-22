@@ -75,6 +75,7 @@ double length(Point3 value) { return std::sqrt(dot(value, value)); }
 SensorConfig parse_sensor(const boost::json::object& root) {
   SensorConfig config;
   config.name = root.at("name").as_string().c_str();
+  if (root.if_contains("enabled")) config.enabled = bool_value(root, "enabled");
   config.source = root.at("source").as_string().c_str();
   if (const auto* serial = root.if_contains("serial")) config.serial = serial->as_string().c_str();
   const auto& transform = root.at("camera_to_room").as_array();
@@ -326,6 +327,7 @@ boost::json::object serialize_sensor(const SensorConfig& config) {
   }
   boost::json::object result{
       {"name", config.name},
+      {"enabled", config.enabled},
       {"source", config.source},
       {"camera_to_room", std::move(transform)},
       {"processing", std::move(processing)},
