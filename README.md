@@ -26,7 +26,7 @@ The local source build of libfreenect2 can be used directly:
 
 ```sh
 cmake -S . -B build \
-  -DFREENECT2_ROOT=/home/alu52/libfreenect2 \
+  -DFREENECT2_ROOT="$FREENECT2_ROOT" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 ctest --test-dir build --output-on-failure
@@ -39,7 +39,7 @@ The optional calibration executable also requires the Debian `libglfw3-dev` and 
 When using an uninstalled source build, its shared library may need to be exposed at runtime:
 
 ```sh
-export LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH="$FREENECT2_ROOT/build/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
 ## Run without hardware
@@ -94,7 +94,7 @@ The interactive tool below provides automatic floor-plane fitting plus manual co
 cp config/specter-sense.example.json config/specter-sense.local.json
 cp .env.example .env
 # Point SPECTER_SENSE_CONFIG at the local JSON and select the desired source.
-LD_LIBRARY_PATH=/home/alu52/libfreenect2/build/lib \
+LD_LIBRARY_PATH="$FREENECT2_ROOT/build/lib" \
   ./build/specter-sense-calibrate
 ```
 

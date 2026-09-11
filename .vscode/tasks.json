@@ -10,7 +10,7 @@
         "${workspaceFolder}",
         "-B",
         "${workspaceFolder}/build",
-        "-DFREENECT2_ROOT=/home/alu52/libfreenect2",
+        "-DFREENECT2_ROOT=${env:FREENECT2_ROOT}",
         "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
       ],
       "problemMatcher": []
@@ -73,7 +73,7 @@
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
-          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+          "LD_LIBRARY_PATH": "${env:FREENECT2_ROOT}/build/lib:${env:LD_LIBRARY_PATH}"
         }
       },
       "dependsOn": "CMake: Build",
@@ -93,7 +93,7 @@
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
-          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+          "LD_LIBRARY_PATH": "${env:FREENECT2_ROOT}/build/lib:${env:LD_LIBRARY_PATH}"
         }
       },
       "dependsOn": "CMake: Build",
@@ -115,7 +115,7 @@
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
-          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+          "LD_LIBRARY_PATH": "${env:FREENECT2_ROOT}/build/lib:${env:LD_LIBRARY_PATH}"
         }
       },
       "dependsOn": "CMake: Build",
@@ -135,7 +135,7 @@
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
-          "LD_LIBRARY_PATH": "/home/alu52/libfreenect2/build/lib:${env:LD_LIBRARY_PATH}"
+          "LD_LIBRARY_PATH": "${env:FREENECT2_ROOT}/build/lib:${env:LD_LIBRARY_PATH}"
         }
       },
       "dependsOn": "CMake: Build",
